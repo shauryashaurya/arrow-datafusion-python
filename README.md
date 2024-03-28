@@ -24,7 +24,16 @@
 
 This is a Python library that binds to [Apache Arrow](https://arrow.apache.org/) in-memory query engine [DataFusion](https://github.com/apache/arrow-datafusion).
 
-DataFusion's Python bindings can be used as an end-user tool as well as providing a foundation for building new systems.
+DataFusion's Python bindings can be used as a foundation for building new data systems in Python. Here are some examples:
+
+- [Dask SQL](https://github.com/dask-contrib/dask-sql) uses DataFusion's Python bindings for SQL parsing, query
+  planning, and logical plan optimizations, and then transpiles the logical plan to Dask operations for execution.
+- [DataFusion Ballista](https://github.com/apache/arrow-ballista) is a distributed SQL query engine that extends
+  DataFusion's Python bindings for distributed use cases.
+
+It is also possible to use these Python bindings directly for DataFrame and SQL operations, but you may find that
+[Polars](http://pola.rs/) and [DuckDB](http://www.duckdb.org/) are more suitable for this use case, since they have
+more of an end-user focus and are more actively maintained than these Python bindings.
 
 ## Features
 
@@ -34,20 +43,6 @@ DataFusion's Python bindings can be used as an end-user tool as well as providin
 - Exchange data with Pandas and other DataFrame libraries that support PyArrow.
 - Serialize and deserialize query plans in Substrait format.
 - Experimental support for transpiling SQL queries to DataFrame calls with Polars, Pandas, and cuDF.
-
-## Comparison with other projects
-
-Here is a comparison with similar projects that may help understand when DataFusion might be suitable and unsuitable
-for your needs:
-
-- [DuckDB](http://www.duckdb.org/) is an open source, in-process analytic database. Like DataFusion, it supports
-  very fast execution, both from its custom file format and directly from Parquet files. Unlike DataFusion, it is
-  written in C/C++ and it is primarily used directly by users as a serverless database and query system rather than
-  as a library for building such database systems.
-
-- [Polars](http://pola.rs/) is one of the fastest DataFrame libraries at the time of writing. Like DataFusion, it
-  is also written in Rust and uses the Apache Arrow memory model, but unlike DataFusion it does not provide full SQL
-  support, nor as many extension points.
 
 ## Example Usage
 
@@ -143,12 +138,6 @@ See [examples](examples/README.md) for more information.
 
 - [Serialize query plans using Substrait](./examples/substrait.py)
 
-### Executing SQL against DataFrame Libraries (Experimental)
-
-- [Executing SQL on Polars](./examples/sql-on-polars.py)
-- [Executing SQL on Pandas](./examples/sql-on-pandas.py)
-- [Executing SQL on cuDF](./examples/sql-on-cudf.py)
-
 ## How to install (from pip)
 
 ### Pip
@@ -202,7 +191,7 @@ source venv/bin/activate
 # update pip itself if necessary
 python -m pip install -U pip
 # install dependencies (for Python 3.8+)
-python -m pip install -r requirements-310.txt
+python -m pip install -r requirements.in
 ```
 
 The tests rely on test data in git submodules.
@@ -222,11 +211,26 @@ python -m pytest
 
 ### Running & Installing pre-commit hooks
 
-arrow-datafusion-python takes advantage of [pre-commit](https://pre-commit.com/) to assist developers with code linting to help reduce the number of commits that ultimately fail in CI due to linter errors. Using the pre-commit hooks is optional for the developer but certainly helpful for keeping PRs clean and concise.
+arrow-datafusion-python takes advantage of [pre-commit](https://pre-commit.com/) to assist developers with code linting to help reduce
+the number of commits that ultimately fail in CI due to linter errors. Using the pre-commit hooks is optional for the
+developer but certainly helpful for keeping PRs clean and concise.
 
-Our pre-commit hooks can be installed by running `pre-commit install`, which will install the configurations in your ARROW_DATAFUSION_PYTHON_ROOT/.github directory and run each time you perform a commit, failing to complete the commit if an offending lint is found allowing you to make changes locally before pushing.
+Our pre-commit hooks can be installed by running `pre-commit install`, which will install the configurations in
+your ARROW_DATAFUSION_PYTHON_ROOT/.github directory and run each time you perform a commit, failing to complete
+the commit if an offending lint is found allowing you to make changes locally before pushing.
 
 The pre-commit hooks can also be run adhoc without installing them by simply running `pre-commit run --all-files`
+
+## Running linters without using pre-commit
+
+There are scripts in `ci/scripts` for running Rust and Python linters.
+
+```shell
+./ci/scripts/python_lint.sh
+./ci/scripts/rust_clippy.sh
+./ci/scripts/rust_fmt.sh
+./ci/scripts/rust_toml_fmt.sh
+```
 
 ## How to update dependencies
 

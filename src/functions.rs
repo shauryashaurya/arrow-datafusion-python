@@ -23,6 +23,7 @@ use crate::expr::conditional_expr::PyCaseBuilder;
 use crate::expr::window::PyWindowFrame;
 use crate::expr::PyExpr;
 use datafusion::execution::FunctionRegistry;
+use datafusion::functions;
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::Alias;
 use datafusion_expr::{
@@ -33,6 +34,49 @@ use datafusion_expr::{
     },
     lit, BuiltinScalarFunction, Expr, WindowFunctionDefinition,
 };
+
+#[pyfunction]
+pub fn isnan(expr: PyExpr) -> PyExpr {
+    functions::expr_fn::isnan(expr.into()).into()
+}
+
+#[pyfunction]
+pub fn nullif(expr1: PyExpr, expr2: PyExpr) -> PyExpr {
+    functions::expr_fn::nullif(expr1.into(), expr2.into()).into()
+}
+
+#[pyfunction]
+pub fn encode(input: PyExpr, encoding: PyExpr) -> PyExpr {
+    functions::expr_fn::encode(input.into(), encoding.into()).into()
+}
+
+#[pyfunction]
+pub fn decode(input: PyExpr, encoding: PyExpr) -> PyExpr {
+    functions::expr_fn::decode(input.into(), encoding.into()).into()
+}
+
+#[pyfunction]
+pub fn array_to_string(expr: PyExpr, delim: PyExpr) -> PyExpr {
+    datafusion_functions_array::expr_fn::array_to_string(expr.into(), delim.into()).into()
+}
+
+#[pyfunction]
+pub fn array_join(expr: PyExpr, delim: PyExpr) -> PyExpr {
+    // alias for array_to_string
+    array_to_string(expr, delim)
+}
+
+#[pyfunction]
+pub fn list_to_string(expr: PyExpr, delim: PyExpr) -> PyExpr {
+    // alias for array_to_string
+    array_to_string(expr, delim)
+}
+
+#[pyfunction]
+pub fn list_join(expr: PyExpr, delim: PyExpr) -> PyExpr {
+    // alias for array_to_string
+    array_to_string(expr, delim)
+}
 
 #[pyfunction]
 fn in_list(expr: PyExpr, value: Vec<PyExpr>, negated: bool) -> PyExpr {
@@ -252,7 +296,6 @@ scalar_function!(factorial, Factorial);
 scalar_function!(floor, Floor);
 scalar_function!(gcd, Gcd);
 scalar_function!(initcap, InitCap, "Converts the first letter of each word to upper case and the rest to lower case. Words are sequences of alphanumeric characters separated by non-alphanumeric characters.");
-scalar_function!(isnan, Isnan);
 scalar_function!(iszero, Iszero);
 scalar_function!(lcm, Lcm);
 scalar_function!(left, Left, "Returns first n characters in the string, or when n is negative, returns all but last |n| characters.");
@@ -348,15 +391,12 @@ scalar_function!(trunc, Trunc);
 scalar_function!(upper, Upper, "Converts the string to all upper case.");
 scalar_function!(make_array, MakeArray);
 scalar_function!(array, MakeArray);
-scalar_function!(nullif, NullIf);
+scalar_function!(range, Range);
 scalar_function!(uuid, Uuid);
 scalar_function!(r#struct, Struct); // Use raw identifier since struct is a keyword
 scalar_function!(from_unixtime, FromUnixtime);
 scalar_function!(arrow_typeof, ArrowTypeof);
 scalar_function!(random, Random);
-//Binary String Functions
-scalar_function!(encode, Encode);
-scalar_function!(decode, Decode);
 
 // Array Functions
 scalar_function!(array_append, ArrayAppend);
@@ -366,6 +406,8 @@ scalar_function!(list_push_back, ArrayAppend);
 scalar_function!(array_concat, ArrayConcat);
 scalar_function!(array_cat, ArrayConcat);
 scalar_function!(array_dims, ArrayDims);
+scalar_function!(array_distinct, ArrayDistinct);
+scalar_function!(list_distinct, ArrayDistinct);
 scalar_function!(list_dims, ArrayDims);
 scalar_function!(array_element, ArrayElement);
 scalar_function!(array_extract, ArrayElement);
@@ -382,10 +424,6 @@ scalar_function!(list_position, ArrayPosition);
 scalar_function!(list_indexof, ArrayPosition);
 scalar_function!(array_positions, ArrayPositions);
 scalar_function!(list_positions, ArrayPositions);
-scalar_function!(array_to_string, ArrayToString);
-scalar_function!(array_join, ArrayToString);
-scalar_function!(list_to_string, ArrayToString);
-scalar_function!(list_join, ArrayToString);
 scalar_function!(array_ndims, ArrayNdims);
 scalar_function!(list_ndims, ArrayNdims);
 scalar_function!(array_prepend, ArrayPrepend);
@@ -409,6 +447,15 @@ scalar_function!(array_replace_all, ArrayReplaceAll);
 scalar_function!(list_replace_all, ArrayReplaceAll);
 scalar_function!(array_slice, ArraySlice);
 scalar_function!(list_slice, ArraySlice);
+scalar_function!(array_intersect, ArrayIntersect);
+scalar_function!(list_intersect, ArrayIntersect);
+scalar_function!(array_union, ArrayUnion);
+scalar_function!(list_union, ArrayUnion);
+scalar_function!(array_except, ArrayExcept);
+scalar_function!(list_except, ArrayExcept);
+scalar_function!(array_resize, ArrayResize);
+scalar_function!(list_resize, ArrayResize);
+scalar_function!(flatten, Flatten);
 
 aggregate_function!(approx_distinct, ApproxDistinct);
 aggregate_function!(approx_median, ApproxMedian);
@@ -463,6 +510,7 @@ pub(crate) fn init_module(m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(approx_percentile_cont))?;
     m.add_wrapped(wrap_pyfunction!(approx_percentile_cont_with_weight))?;
     m.add_wrapped(wrap_pyfunction!(array))?;
+    m.add_wrapped(wrap_pyfunction!(range))?;
     m.add_wrapped(wrap_pyfunction!(array_agg))?;
     m.add_wrapped(wrap_pyfunction!(arrow_typeof))?;
     m.add_wrapped(wrap_pyfunction!(ascii))?;
@@ -608,6 +656,8 @@ pub(crate) fn init_module(m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(array_concat))?;
     m.add_wrapped(wrap_pyfunction!(array_cat))?;
     m.add_wrapped(wrap_pyfunction!(array_dims))?;
+    m.add_wrapped(wrap_pyfunction!(array_distinct))?;
+    m.add_wrapped(wrap_pyfunction!(list_distinct))?;
     m.add_wrapped(wrap_pyfunction!(list_dims))?;
     m.add_wrapped(wrap_pyfunction!(array_element))?;
     m.add_wrapped(wrap_pyfunction!(array_extract))?;
@@ -625,6 +675,14 @@ pub(crate) fn init_module(m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(array_positions))?;
     m.add_wrapped(wrap_pyfunction!(list_positions))?;
     m.add_wrapped(wrap_pyfunction!(array_to_string))?;
+    m.add_wrapped(wrap_pyfunction!(array_intersect))?;
+    m.add_wrapped(wrap_pyfunction!(list_intersect))?;
+    m.add_wrapped(wrap_pyfunction!(array_union))?;
+    m.add_wrapped(wrap_pyfunction!(list_union))?;
+    m.add_wrapped(wrap_pyfunction!(array_except))?;
+    m.add_wrapped(wrap_pyfunction!(list_except))?;
+    m.add_wrapped(wrap_pyfunction!(array_resize))?;
+    m.add_wrapped(wrap_pyfunction!(list_resize))?;
     m.add_wrapped(wrap_pyfunction!(array_join))?;
     m.add_wrapped(wrap_pyfunction!(list_to_string))?;
     m.add_wrapped(wrap_pyfunction!(list_join))?;
@@ -651,6 +709,7 @@ pub(crate) fn init_module(m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(list_replace_all))?;
     m.add_wrapped(wrap_pyfunction!(array_slice))?;
     m.add_wrapped(wrap_pyfunction!(list_slice))?;
+    m.add_wrapped(wrap_pyfunction!(flatten))?;
 
     Ok(())
 }
