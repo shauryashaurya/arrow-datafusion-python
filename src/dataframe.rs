@@ -25,6 +25,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use datafusion::parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::prelude::*;
+use datafusion_common::UnnestOptions;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -293,6 +294,17 @@ impl PyDataFrame {
         Ok(Self::new(new_df))
     }
 
+    #[pyo3(signature = (column, preserve_nulls=true))]
+    fn unnest_column(&self, column: &str, preserve_nulls: bool) -> PyResult<Self> {
+        let unnest_options = UnnestOptions { preserve_nulls };
+        let df = self
+            .df
+            .as_ref()
+            .clone()
+            .unnest_column_with_options(column, unnest_options)?;
+        Ok(Self::new(df))
+    }
+
     /// Calculate the intersection of two `DataFrame`s.  The two `DataFrame`s must have exactly the same schema
     fn intersect(&self, py_df: PyDataFrame) -> PyResult<Self> {
         let new_df = self
@@ -424,10 +436,7 @@ impl PyDataFrame {
         let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
 
         match stream {
-            Ok(batches) => Ok(batches
-                .into_iter()
-                .map(|batch_stream| PyRecordBatchStream::new(batch_stream))
-                .collect()),
+            Ok(batches) => Ok(batches.into_iter().map(PyRecordBatchStream::new).collect()),
             _ => Err(PyValueError::new_err(
                 "Unable to execute stream partitioned",
             )),

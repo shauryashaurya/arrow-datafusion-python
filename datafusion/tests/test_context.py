@@ -19,16 +19,17 @@ import os
 
 import pyarrow as pa
 import pyarrow.dataset as ds
+import pytest
 
 from datafusion import (
+    DataFrame,
+    RuntimeConfig,
+    SessionConfig,
+    SessionContext,
+    SQLOptions,
     column,
     literal,
-    SessionContext,
-    SessionConfig,
-    RuntimeConfig,
-    DataFrame,
 )
-import pytest
 
 
 def test_create_context_no_args():
@@ -136,6 +137,37 @@ def test_from_arrow_table_with_name(ctx):
 
     assert df
     assert tables[0] == "tbl"
+
+
+def test_from_arrow_table_empty(ctx):
+    data = {"a": [], "b": []}
+    schema = pa.schema([("a", pa.int32()), ("b", pa.string())])
+    table = pa.Table.from_pydict(data, schema=schema)
+
+    # convert to DataFrame
+    df = ctx.from_arrow_table(table)
+    tables = list(ctx.tables())
+
+    assert df
+    assert len(tables) == 1
+    assert isinstance(df, DataFrame)
+    assert set(df.schema().names) == {"a", "b"}
+    assert len(df.collect()) == 0
+
+
+def test_from_arrow_table_empty_no_schema(ctx):
+    data = {"a": [], "b": []}
+    table = pa.Table.from_pydict(data)
+
+    # convert to DataFrame
+    df = ctx.from_arrow_table(table)
+    tables = list(ctx.tables())
+
+    assert df
+    assert len(tables) == 1
+    assert isinstance(df, DataFrame)
+    assert set(df.schema().names) == {"a", "b"}
+    assert len(df.collect()) == 0
 
 
 def test_from_pylist(ctx):
@@ -389,3 +421,38 @@ def test_read_parquet(ctx):
 def test_read_avro(ctx):
     csv_df = ctx.read_avro(path="testing/data/avro/alltypes_plain.avro")
     csv_df.show()
+
+
+def test_create_sql_options():
+    SQLOptions()
+
+
+def test_sql_with_options_no_ddl(ctx):
+    sql = "CREATE TABLE IF NOT EXISTS valuetable AS VALUES(1,'HELLO'),(12,'DATAFUSION')"
+    ctx.sql(sql)
+    options = SQLOptions().with_allow_ddl(False)
+    with pytest.raises(Exception, match="DDL"):
+        ctx.sql_with_options(sql, options=options)
+
+
+def test_sql_with_options_no_dml(ctx):
+    table_name = "t"
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2, 3]), pa.array([4, 5, 6])],
+        names=["a", "b"],
+    )
+    dataset = ds.dataset([batch])
+    ctx.register_dataset(table_name, dataset)
+    sql = f'INSERT INTO "{table_name}" VALUES (1, 2), (2, 3);'
+    ctx.sql(sql)
+    options = SQLOptions().with_allow_dml(False)
+    with pytest.raises(Exception, match="DML"):
+        ctx.sql_with_options(sql, options=options)
+
+
+def test_sql_with_options_no_statements(ctx):
+    sql = "SET time zone = 1;"
+    ctx.sql(sql)
+    options = SQLOptions().with_allow_statements(False)
+    with pytest.raises(Exception, match="SetVariable"):
+        ctx.sql_with_options(sql, options=options)

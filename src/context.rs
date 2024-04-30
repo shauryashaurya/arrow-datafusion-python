@@ -39,13 +39,19 @@ use crate::store::StorageContexts;
 use crate::udaf::PyAggregateUDF;
 use crate::udf::PyScalarUDF;
 use crate::utils::{get_tokio_runtime, wait_for_future};
-use datafusion::arrow::datatypes::{DataType, Schema};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::datasource::MemTable;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::{SessionConfig, SessionContext, SessionState, TaskContext};
+use datafusion::execution::context::{
+    SQLOptions, SessionConfig, SessionContext, SessionState, TaskContext,
+};
 use datafusion::execution::disk_manager::DiskManagerConfig;
 use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
@@ -210,6 +216,43 @@ impl PyRuntimeConfig {
     }
 }
 
+/// `PySQLOptions` allows you to specify options to the sql execution.
+#[pyclass(name = "SQLOptions", module = "datafusion", subclass)]
+#[derive(Clone)]
+pub struct PySQLOptions {
+    pub options: SQLOptions,
+}
+
+impl From<SQLOptions> for PySQLOptions {
+    fn from(options: SQLOptions) -> Self {
+        Self { options }
+    }
+}
+
+#[pymethods]
+impl PySQLOptions {
+    #[new]
+    fn new() -> Self {
+        let options = SQLOptions::new();
+        Self { options }
+    }
+
+    /// Should DDL data modification commands  (e.g. `CREATE TABLE`) be run? Defaults to `true`.
+    fn with_allow_ddl(&self, allow: bool) -> Self {
+        Self::from(self.options.with_allow_ddl(allow))
+    }
+
+    /// Should DML data modification commands (e.g. `INSERT and COPY`) be run? Defaults to `true`
+    pub fn with_allow_dml(&self, allow: bool) -> Self {
+        Self::from(self.options.with_allow_dml(allow))
+    }
+
+    /// Should Statements such as (e.g. `SET VARIABLE and `BEGIN TRANSACTION` ...`) be run?. Defaults to `true`
+    pub fn with_allow_statements(&self, allow: bool) -> Self {
+        Self::from(self.options.with_allow_statements(allow))
+    }
+}
+
 /// `PySessionContext` is able to plan and execute DataFusion plans.
 /// It has a powerful optimizer, a physical planner for local execution, and a
 /// multi-threaded execution engine to perform the execution.
@@ -244,7 +287,7 @@ impl PySessionContext {
         })
     }
 
-    /// Register a an object store with the given name
+    /// Register an object store with the given name
     pub fn register_object_store(
         &mut self,
         scheme: &str,
@@ -278,9 +321,72 @@ impl PySessionContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, path, table_partition_cols=vec![],
+    file_extension=".parquet",
+    schema=None,
+    file_sort_order=None))]
+    pub fn register_listing_table(
+        &mut self,
+        name: &str,
+        path: &str,
+        table_partition_cols: Vec<(String, String)>,
+        file_extension: &str,
+        schema: Option<PyArrowType<Schema>>,
+        file_sort_order: Option<Vec<Vec<PyExpr>>>,
+        py: Python,
+    ) -> PyResult<()> {
+        let options = ListingOptions::new(Arc::new(ParquetFormat::new()))
+            .with_file_extension(file_extension)
+            .with_table_partition_cols(convert_table_partition_cols(table_partition_cols)?)
+            .with_file_sort_order(
+                file_sort_order
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| e.into_iter().map(|f| f.into()).collect())
+                    .collect(),
+            );
+        let table_path = ListingTableUrl::parse(path)?;
+        let resolved_schema: SchemaRef = match schema {
+            Some(s) => Arc::new(s.0),
+            None => {
+                let state = self.ctx.state();
+                let schema = options.infer_schema(&state, &table_path);
+                wait_for_future(py, schema).map_err(DataFusionError::from)?
+            }
+        };
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(options)
+            .with_schema(resolved_schema);
+        let table = ListingTable::try_new(config)?;
+        self.register_table(
+            name,
+            &PyTable {
+                table: Arc::new(table),
+            },
+        )?;
+        Ok(())
+    }
+
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
     pub fn sql(&mut self, query: &str, py: Python) -> PyResult<PyDataFrame> {
         let result = self.ctx.sql(query);
+        let df = wait_for_future(py, result).map_err(DataFusionError::from)?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    pub fn sql_with_options(
+        &mut self,
+        query: &str,
+        options: Option<PySQLOptions>,
+        py: Python,
+    ) -> PyResult<PyDataFrame> {
+        let options = if let Some(options) = options {
+            options.options
+        } else {
+            SQLOptions::new()
+        };
+        let result = self.ctx.sql_with_options(query, options);
         let df = wait_for_future(py, result).map_err(DataFusionError::from)?;
         Ok(PyDataFrame::new(df))
     }
@@ -289,9 +395,15 @@ impl PySessionContext {
         &mut self,
         partitions: PyArrowType<Vec<Vec<RecordBatch>>>,
         name: Option<&str>,
+        schema: Option<PyArrowType<Schema>>,
         py: Python,
     ) -> PyResult<PyDataFrame> {
-        let schema = partitions.0[0][0].schema();
+        let schema = if let Some(schema) = schema {
+            SchemaRef::from(schema.0)
+        } else {
+            partitions.0[0][0].schema()
+        };
+
         let table = MemTable::try_new(schema, partitions.0).map_err(DataFusionError::from)?;
 
         // generate a random (unique) name for this table if none is provided
@@ -373,12 +485,15 @@ impl PySessionContext {
             // Instantiate pyarrow Table object & convert to batches
             let table = data.call_method0(py, "to_batches")?;
 
+            let schema = data.getattr(py, "schema")?;
+            let schema = schema.extract::<PyArrowType<Schema>>(py)?;
+
             // Cast PyObject to RecordBatch type
             // Because create_dataframe() expects a vector of vectors of record batches
             // here we need to wrap the vector of record batches in an additional vector
             let batches = table.extract::<PyArrowType<Vec<RecordBatch>>>(py)?;
             let list_of_batches = PyArrowType::from(vec![batches.0]);
-            self.create_dataframe(list_of_batches, name, py)
+            self.create_dataframe(list_of_batches, name, Some(schema), py)
         })
     }
 
@@ -849,8 +964,9 @@ pub fn convert_table_partition_cols(
         .into_iter()
         .map(|(name, ty)| match ty.as_str() {
             "string" => Ok((name, DataType::Utf8)),
+            "int" => Ok((name, DataType::Int32)),
             _ => Err(DataFusionError::Common(format!(
-                "Unsupported data type '{ty}' for partition column"
+                "Unsupported data type '{ty}' for partition column. Supported types are 'string' and 'int'"
             ))),
         })
         .collect::<Result<Vec<_>, _>>()
