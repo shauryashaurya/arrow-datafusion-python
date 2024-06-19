@@ -1,5 +1,3 @@
-#!/bin/bash
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -16,18 +14,20 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-#
 
-# Usage:
-# CHANGELOG_GITHUB_TOKEN=<TOKEN> ./update_change_log-datafusion.sh main 8.0.0 7.1.0
-# CHANGELOG_GITHUB_TOKEN=<TOKEN> ./update_change_log-datafusion.sh maint-7.x 7.1.0 7.0.0
+"""
+Common utilities for running TPC-H examples.
+"""
 
-RELEASE_BRANCH=$1
-RELEASE_TAG=$2
-BASE_TAG=$3
+import os
+from pathlib import Path
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-${SOURCE_DIR}/update_change_log.sh \
-    "${BASE_TAG}" \
-    --future-release "${RELEASE_TAG}" \
-    --release-branch "${RELEASE_BRANCH}"
+def get_data_path(filename: str) -> str:
+    path = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(path, "data", filename)
+
+def get_answer_file(answer_file: str) -> str:
+    path = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(path, "../../benchmarks/tpch/data/answers", f"{answer_file}.out")

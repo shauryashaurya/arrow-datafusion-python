@@ -27,7 +27,6 @@ from datafusion import (
 )
 
 from datafusion.common import (
-    DFField,
     DFSchema,
 )
 
@@ -54,7 +53,6 @@ from datafusion.expr import (
     SimilarTo,
     ScalarVariable,
     Alias,
-    GetIndexedField,
     Not,
     IsNotNull,
     IsTrue,
@@ -64,8 +62,6 @@ from datafusion.expr import (
     IsNotFalse,
     IsNotUnknown,
     Negative,
-    ScalarFunction,
-    BuiltinScalarFunction,
     InList,
     Exists,
     Subquery,
@@ -129,7 +125,6 @@ def test_class_module_is_datafusion():
         SimilarTo,
         ScalarVariable,
         Alias,
-        GetIndexedField,
         Not,
         IsNotNull,
         IsTrue,
@@ -139,8 +134,6 @@ def test_class_module_is_datafusion():
         IsNotFalse,
         IsNotUnknown,
         Negative,
-        ScalarFunction,
-        BuiltinScalarFunction,
         InList,
         Exists,
         Subquery,
@@ -165,7 +158,7 @@ def test_class_module_is_datafusion():
         assert klass.__module__ == "datafusion.expr"
 
     # schema
-    for klass in [DFField, DFSchema]:
+    for klass in [DFSchema]:
         assert klass.__module__ == "datafusion.common"
 
 

@@ -92,7 +92,7 @@ DataFusion offers a range of helpful options.
         f.left(col('"Name"'), literal(4)).alias("code")
     )
 
-This also includes the functions for regular expressions :func:`.regexp_replace` and :func:`.regexp_match`
+This also includes the functions for regular expressions like :func:`.regexp_replace` and :func:`.regexp_match`
 
 .. ipython:: python
 

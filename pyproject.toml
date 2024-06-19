@@ -16,7 +16,7 @@
 # under the License.
 
 [build-system]
-requires = ["maturin>=0.15,<0.16"]
+requires = ["maturin>=1.5.1,<1.6.0"]
 build-backend = "maturin"
 
 [project]
@@ -47,14 +47,15 @@ dependencies = [
 ]
 
 [project.urls]
-homepage = "https://arrow.apache.org/datafusion-python"
-documentation = "https://arrow.apache.org/datafusion-python"
-repository = "https://github.com/apache/arrow-datafusion-python"
+homepage = "https://datafusion.apache.org/python"
+documentation = "https://datafusion.apache.org/python"
+repository = "https://github.com/apache/datafusion-python"
 
 [tool.isort]
 profile = "black"
 
 [tool.maturin]
+python-source = "python"
 module-name = "datafusion._internal"
 include = [
     { path = "Cargo.lock", format = "sdist" }

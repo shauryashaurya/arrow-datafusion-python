@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion::physical_plan::{displayable, ExecutionPlan};
+use datafusion::physical_plan::{displayable, ExecutionPlan, ExecutionPlanProperties};
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -40,7 +40,7 @@ impl PyExecutionPlan {
         self.plan
             .children()
             .iter()
-            .map(|p| p.to_owned().into())
+            .map(|&p| p.to_owned().into())
             .collect()
     }
 

@@ -32,11 +32,11 @@ use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError as InnerDataFusionError, Result as DFResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
-    Statistics,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, ExecutionPlanProperties,
+    Partitioning, SendableRecordBatchStream, Statistics,
 };
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::Expr;
@@ -53,7 +53,7 @@ impl Iterator for PyArrowBatchesAdapter {
 
     fn next(&mut self) -> Option<Self::Item> {
         Python::with_gil(|py| {
-            let mut batches: &PyIterator = self.batches.as_ref(py);
+            let mut batches = self.batches.clone().into_bound(py);
             Some(
                 batches
                     .next()?
@@ -73,12 +73,13 @@ pub(crate) struct DatasetExec {
     columns: Option<Vec<String>>,
     filter_expr: Option<PyObject>,
     projected_statistics: Statistics,
+    plan_properties: datafusion::physical_plan::PlanProperties,
 }
 
 impl DatasetExec {
     pub fn new(
         py: Python,
-        dataset: &PyAny,
+        dataset: &Bound<'_, PyAny>,
         projection: Option<Vec<usize>>,
         filters: &[Expr],
     ) -> Result<Self, DataFusionError> {
@@ -102,7 +103,7 @@ impl DatasetExec {
             })
             .transpose()?;
 
-        let kwargs = PyDict::new(py);
+        let kwargs = PyDict::new_bound(py);
 
         kwargs.set_item("columns", columns.clone())?;
         kwargs.set_item(
@@ -110,7 +111,7 @@ impl DatasetExec {
             filter_expr.as_ref().map(|expr| expr.clone_ref(py)),
         )?;
 
-        let scanner = dataset.call_method("scanner", (), Some(kwargs))?;
+        let scanner = dataset.call_method("scanner", (), Some(&kwargs))?;
 
         let schema = Arc::new(
             scanner
@@ -119,28 +120,33 @@ impl DatasetExec {
                 .0,
         );
 
-        let builtins = Python::import(py, "builtins")?;
+        let builtins = Python::import_bound(py, "builtins")?;
         let pylist = builtins.getattr("list")?;
 
         // Get the fragments or partitions of the dataset
-        let fragments_iterator: &PyAny = dataset.call_method1(
+        let fragments_iterator: Bound<'_, PyAny> = dataset.call_method1(
             "get_fragments",
             (filter_expr.as_ref().map(|expr| expr.clone_ref(py)),),
         )?;
 
-        let fragments: &PyList = pylist
-            .call1((fragments_iterator,))?
-            .downcast()
-            .map_err(PyErr::from)?;
+        let fragments_iter = pylist.call1((fragments_iterator,))?;
+        let fragments = fragments_iter.downcast::<PyList>().map_err(PyErr::from)?;
 
         let projected_statistics = Statistics::new_unknown(&schema);
+        let plan_properties = datafusion::physical_plan::PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(fragments.len()),
+            ExecutionMode::Bounded,
+        );
+
         Ok(DatasetExec {
-            dataset: dataset.into(),
+            dataset: dataset.clone().unbind(),
             schema,
-            fragments: fragments.into(),
+            fragments: fragments.clone().unbind(),
             columns,
             filter_expr,
             projected_statistics,
+            plan_properties,
         })
     }
 }
@@ -156,19 +162,7 @@ impl ExecutionPlan for DatasetExec {
         self.schema.clone()
     }
 
-    /// Get the output partitioning of this plan
-    fn output_partitioning(&self) -> Partitioning {
-        Python::with_gil(|py| {
-            let fragments = self.fragments.as_ref(py);
-            Partitioning::UnknownPartitioning(fragments.len())
-        })
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
-    }
-
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         // this is a leaf node and has no children
         vec![]
     }
@@ -187,8 +181,8 @@ impl ExecutionPlan for DatasetExec {
     ) -> DFResult<SendableRecordBatchStream> {
         let batch_size = context.session_config().batch_size();
         Python::with_gil(|py| {
-            let dataset = self.dataset.as_ref(py);
-            let fragments = self.fragments.as_ref(py);
+            let dataset = self.dataset.bind(py);
+            let fragments = self.fragments.bind(py);
             let fragment = fragments
                 .get_item(partition)
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
@@ -197,7 +191,7 @@ impl ExecutionPlan for DatasetExec {
             let dataset_schema = dataset
                 .getattr("schema")
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            let kwargs = PyDict::new(py);
+            let kwargs = PyDict::new_bound(py);
             kwargs
                 .set_item("columns", self.columns.clone())
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
@@ -211,7 +205,7 @@ impl ExecutionPlan for DatasetExec {
                 .set_item("batch_size", batch_size)
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
             let scanner = fragment
-                .call_method("scanner", (dataset_schema,), Some(kwargs))
+                .call_method("scanner", (dataset_schema,), Some(&kwargs))
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
             let schema: SchemaRef = Arc::new(
                 scanner
@@ -219,7 +213,7 @@ impl ExecutionPlan for DatasetExec {
                     .and_then(|schema| Ok(schema.extract::<PyArrowType<_>>()?.0))
                     .map_err(|err| InnerDataFusionError::External(Box::new(err)))?,
             );
-            let record_batches: &PyIterator = scanner
+            let record_batches: Bound<'_, PyIterator> = scanner
                 .call_method0("to_batches")
                 .map_err(|err| InnerDataFusionError::External(Box::new(err)))?
                 .iter()
@@ -240,12 +234,35 @@ impl ExecutionPlan for DatasetExec {
     fn statistics(&self) -> DFResult<Statistics> {
         Ok(self.projected_statistics.clone())
     }
+
+    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+        &self.plan_properties
+    }
+}
+
+impl ExecutionPlanProperties for DatasetExec {
+    /// Get the output partitioning of this plan
+    fn output_partitioning(&self) -> &Partitioning {
+        self.plan_properties.output_partitioning()
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        None
+    }
+
+    fn execution_mode(&self) -> datafusion::physical_plan::ExecutionMode {
+        self.plan_properties.execution_mode
+    }
+
+    fn equivalence_properties(&self) -> &datafusion::physical_expr::EquivalenceProperties {
+        &self.plan_properties.eq_properties
+    }
 }
 
 impl DisplayAs for DatasetExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         Python::with_gil(|py| {
-            let number_of_fragments = self.fragments.as_ref(py).len();
+            let number_of_fragments = self.fragments.bind(py).len();
             match t {
                 DisplayFormatType::Default | DisplayFormatType::Verbose => {
                     let projected_columns: Vec<String> = self
@@ -255,7 +272,7 @@ impl DisplayAs for DatasetExec {
                         .map(|x| x.name().to_owned())
                         .collect();
                     if let Some(filter_expr) = &self.filter_expr {
-                        let filter_expr = filter_expr.as_ref(py).str().or(Err(std::fmt::Error))?;
+                        let filter_expr = filter_expr.bind(py).str().or(Err(std::fmt::Error))?;
                         write!(
                             f,
                             "DatasetExec: number_of_fragments={}, filter_expr={}, projection=[{}]",

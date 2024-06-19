@@ -37,7 +37,6 @@ from ._internal import (
 )
 
 from .common import (
-    DFField,
     DFSchema,
 )
 
@@ -54,7 +53,6 @@ from .expr import (
     ScalarVariable,
     Sort,
     TableScan,
-    GetIndexedField,
     Not,
     IsNotNull,
     IsTrue,
@@ -64,8 +62,6 @@ from .expr import (
     IsNotFalse,
     IsNotUnknown,
     Negative,
-    ScalarFunction,
-    BuiltinScalarFunction,
     InList,
     Exists,
     Subquery,
@@ -119,7 +115,6 @@ __all__ = [
     "SimilarTo",
     "ScalarVariable",
     "Alias",
-    "GetIndexedField",
     "Not",
     "IsNotNull",
     "IsTrue",

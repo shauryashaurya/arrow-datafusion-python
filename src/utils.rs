@@ -24,22 +24,22 @@ use tokio::runtime::Runtime;
 
 /// Utility to get the Tokio Runtime from Python
 pub(crate) fn get_tokio_runtime(py: Python) -> PyRef<TokioRuntime> {
-    let datafusion = py.import("datafusion._internal").unwrap();
+    let datafusion = py.import_bound("datafusion._internal").unwrap();
     let tmp = datafusion.getattr("runtime").unwrap();
     match tmp.extract::<PyRef<TokioRuntime>>() {
         Ok(runtime) => runtime,
         Err(_e) => {
             let rt = TokioRuntime(tokio::runtime::Runtime::new().unwrap());
-            let obj: &PyAny = Py::new(py, rt).unwrap().into_ref(py);
+            let obj: Bound<'_, TokioRuntime> = Py::new(py, rt).unwrap().into_bound(py);
             obj.extract().unwrap()
         }
     }
 }
 
 /// Utility to collect rust futures with GIL released
-pub fn wait_for_future<F: Future>(py: Python, f: F) -> F::Output
+pub fn wait_for_future<F>(py: Python, f: F) -> F::Output
 where
-    F: Send,
+    F: Future + Send,
     F::Output: Send,
 {
     let runtime: &Runtime = &get_tokio_runtime(py).0;

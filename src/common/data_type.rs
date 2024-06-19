@@ -226,6 +226,19 @@ impl DataTypeMap {
             DataType::RunEndEncoded(_, _) => Err(py_datafusion_err(
                 DataFusionError::NotImplemented(format!("{:?}", arrow_type)),
             )),
+            DataType::BinaryView => Err(py_datafusion_err(DataFusionError::NotImplemented(
+                format!("{:?}", arrow_type),
+            ))),
+            DataType::Utf8View => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
+                "{:?}",
+                arrow_type
+            )))),
+            DataType::ListView(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
+                format!("{:?}", arrow_type),
+            ))),
+            DataType::LargeListView(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
+                format!("{:?}", arrow_type),
+            ))),
         }
     }
 
@@ -238,6 +251,7 @@ impl DataTypeMap {
     pub fn map_from_scalar_to_arrow(scalar_val: &ScalarValue) -> Result<DataType, PyErr> {
         match scalar_val {
             ScalarValue::Boolean(_) => Ok(DataType::Boolean),
+            ScalarValue::Float16(_) => Ok(DataType::Float16),
             ScalarValue::Float32(_) => Ok(DataType::Float32),
             ScalarValue::Float64(_) => Ok(DataType::Float64),
             ScalarValue::Decimal128(_, precision, scale) => {
@@ -309,6 +323,9 @@ impl DataTypeMap {
             ScalarValue::DurationMillisecond(_) => Ok(DataType::Duration(TimeUnit::Millisecond)),
             ScalarValue::DurationMicrosecond(_) => Ok(DataType::Duration(TimeUnit::Microsecond)),
             ScalarValue::DurationNanosecond(_) => Ok(DataType::Duration(TimeUnit::Nanosecond)),
+            ScalarValue::Union(_, _, _) => Err(py_datafusion_err(DataFusionError::NotImplemented(
+                "ScalarValue::LargeList".to_string(),
+            ))),
         }
     }
 }
@@ -598,6 +615,10 @@ impl DataTypeMap {
             DataType::Decimal256(_, _) => "Decimal256",
             DataType::Map(_, _) => "Map",
             DataType::RunEndEncoded(_, _) => "RunEndEncoded",
+            DataType::BinaryView => "BinaryView",
+            DataType::Utf8View => "Utf8View",
+            DataType::ListView(_) => "ListView",
+            DataType::LargeListView(_) => "LargeListView",
         })
     }
 }
