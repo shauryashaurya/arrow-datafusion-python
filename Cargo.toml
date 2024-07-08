@@ -47,15 +47,16 @@ datafusion-sql = "39.0.0"
 datafusion-substrait = { version = "39.0.0", optional = true }
 prost = "0.12"
 prost-types = "0.12"
-uuid = { version = "1.8", features = ["v4"] }
+uuid = { version = "1.9", features = ["v4"] }
 mimalloc = { version = "0.1", optional = true, default-features = false, features = ["local_dynamic_tls"] }
 async-trait = "0.1"
 futures = "0.3"
 object_store = { version = "0.10.1", features = ["aws", "gcp", "azure"] }
 parking_lot = "0.12"
 regex-syntax = "0.8.1"
-syn = "2.0.43"
+syn = "2.0.68"
 url = "2.2"
+sqlparser = "0.47.0"
 
 [build-dependencies]
 pyo3-build-config = "0.21"
