@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+"""Documentation generation."""
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -44,15 +46,11 @@ author = "Apache Software Foundation"
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    "sphinx.ext.autodoc",
-    "sphinx.ext.autosummary",
-    "sphinx.ext.doctest",
-    "sphinx.ext.ifconfig",
     "sphinx.ext.mathjax",
-    "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
     "myst_parser",
     "IPython.sphinxext.ipython_directive",
+    "autoapi.extension",
 ]
 
 source_suffix = {
@@ -68,15 +66,36 @@ templates_path = ["_templates"]
 # This pattern also affects html_static_path and html_extra_path.
 exclude_patterns = []
 
-# Show members for classes in .. autosummary
-autodoc_default_options = {
-    "members": None,
-    "undoc-members": None,
-    "show-inheritance": None,
-    "inherited-members": None,
-}
+autoapi_dirs = ["../../python"]
+autoapi_ignore = ["*tests*"]
+autoapi_member_order = "groupwise"
+suppress_warnings = ["autoapi.python_import_resolution"]
+autoapi_python_class_content = "both"
 
-autosummary_generate = True
+
+def autoapi_skip_member_fn(app, what, name, obj, skip, options):
+    skip_contents = [
+        # Re-exports
+        ("class", "datafusion.DataFrame"),
+        ("class", "datafusion.SessionContext"),
+        ("module", "datafusion.common"),
+        # Deprecated
+        ("class", "datafusion.substrait.serde"),
+        ("class", "datafusion.substrait.plan"),
+        ("class", "datafusion.substrait.producer"),
+        ("class", "datafusion.substrait.consumer"),
+        ("method", "datafusion.context.SessionContext.tables"),
+        ("method", "datafusion.dataframe.DataFrame.unnest_column"),
+    ]
+    if (what, name) in skip_contents:
+        skip = True
+
+    return skip
+
+
+def setup(sphinx):
+    sphinx.connect("autoapi-skip-member", autoapi_skip_member_fn)
+
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -85,9 +104,7 @@ autosummary_generate = True
 #
 html_theme = "pydata_sphinx_theme"
 
-html_theme_options = {
-    "use_edit_page_button": True,
-}
+html_theme_options = {"use_edit_page_button": False, "show_toc_level": 2}
 
 html_context = {
     "github_user": "apache",

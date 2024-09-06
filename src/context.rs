@@ -20,11 +20,15 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use arrow::array::RecordBatchReader;
+use arrow::ffi_stream::ArrowArrayStreamReader;
+use arrow::pyarrow::FromPyArrow;
+use datafusion::execution::session_state::SessionStateBuilder;
 use object_store::ObjectStore;
 use url::Url;
 use uuid::Uuid;
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::catalog::{PyCatalog, PyTable};
@@ -49,9 +53,7 @@ use datafusion::datasource::listing::{
 };
 use datafusion::datasource::MemTable;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::{
-    SQLOptions, SessionConfig, SessionContext, SessionState, TaskContext,
-};
+use datafusion::execution::context::{SQLOptions, SessionConfig, SessionContext, TaskContext};
 use datafusion::execution::disk_manager::DiskManagerConfig;
 use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
@@ -281,7 +283,11 @@ impl PySessionContext {
             RuntimeConfig::default()
         };
         let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
-        let session_state = SessionState::new_with_config_rt(config, runtime);
+        let session_state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_runtime_env(runtime)
+            .with_default_features()
+            .build();
         Ok(PySessionContext {
             ctx: SessionContext::new_with_state(session_state),
         })
@@ -441,7 +447,7 @@ impl PySessionContext {
         let table = table_class.call_method1("from_pylist", args)?;
 
         // Convert Arrow Table to datafusion DataFrame
-        let df = self.from_arrow_table(table, name, py)?;
+        let df = self.from_arrow(table, name, py)?;
         Ok(df)
     }
 
@@ -460,29 +466,42 @@ impl PySessionContext {
         let table = table_class.call_method1("from_pydict", args)?;
 
         // Convert Arrow Table to datafusion DataFrame
-        let df = self.from_arrow_table(table, name, py)?;
+        let df = self.from_arrow(table, name, py)?;
         Ok(df)
     }
 
     /// Construct datafusion dataframe from Arrow Table
-    pub fn from_arrow_table(
+    pub fn from_arrow(
         &mut self,
         data: Bound<'_, PyAny>,
         name: Option<&str>,
         py: Python,
     ) -> PyResult<PyDataFrame> {
-        // Instantiate pyarrow Table object & convert to batches
-        let table = data.call_method0("to_batches")?;
+        let (schema, batches) =
+            if let Ok(stream_reader) = ArrowArrayStreamReader::from_pyarrow_bound(&data) {
+                // Works for any object that implements __arrow_c_stream__ in pycapsule.
 
-        let schema = data.getattr("schema")?;
-        let schema = schema.extract::<PyArrowType<Schema>>()?;
+                let schema = stream_reader.schema().as_ref().to_owned();
+                let batches = stream_reader
+                    .collect::<Result<Vec<RecordBatch>, arrow::error::ArrowError>>()
+                    .map_err(DataFusionError::from)?;
 
-        // Cast PyAny to RecordBatch type
+                (schema, batches)
+            } else if let Ok(array) = RecordBatch::from_pyarrow_bound(&data) {
+                // While this says RecordBatch, it will work for any object that implements
+                // __arrow_c_array__ and returns a StructArray.
+
+                (array.schema().as_ref().to_owned(), vec![array])
+            } else {
+                return Err(PyTypeError::new_err(
+                    "Expected either a Arrow Array or Arrow Stream in from_arrow().",
+                ));
+            };
+
         // Because create_dataframe() expects a vector of vectors of record batches
         // here we need to wrap the vector of record batches in an additional vector
-        let batches = table.extract::<PyArrowType<Vec<RecordBatch>>>()?;
-        let list_of_batches = PyArrowType::from(vec![batches.0]);
-        self.create_dataframe(list_of_batches, name, Some(schema), py)
+        let list_of_batches = PyArrowType::from(vec![batches]);
+        self.create_dataframe(list_of_batches, name, Some(schema.into()), py)
     }
 
     /// Construct datafusion dataframe from pandas
@@ -501,7 +520,7 @@ impl PySessionContext {
         let table = table_class.call_method1("from_pandas", args)?;
 
         // Convert Arrow Table to datafusion DataFrame
-        let df = self.from_arrow_table(table, name, py)?;
+        let df = self.from_arrow(table, name, py)?;
         Ok(df)
     }
 
@@ -515,7 +534,7 @@ impl PySessionContext {
         let table = data.call_method0("to_arrow")?;
 
         // Convert Arrow Table to datafusion DataFrame
-        let df = self.from_arrow_table(table, name, data.py())?;
+        let df = self.from_arrow(table, name, data.py())?;
         Ok(df)
     }
 
@@ -746,7 +765,8 @@ impl PySessionContext {
     }
 
     pub fn table(&self, name: &str, py: Python) -> PyResult<PyDataFrame> {
-        let x = wait_for_future(py, self.ctx.table(name)).map_err(DataFusionError::from)?;
+        let x = wait_for_future(py, self.ctx.table(name))
+            .map_err(|e| PyKeyError::new_err(e.to_string()))?;
         Ok(PyDataFrame::new(x))
     }
 
@@ -805,7 +825,7 @@ impl PySessionContext {
         file_compression_type=None))]
     pub fn read_csv(
         &self,
-        path: PathBuf,
+        path: &Bound<'_, PyAny>,
         schema: Option<PyArrowType<Schema>>,
         has_header: bool,
         delimiter: &str,
@@ -815,10 +835,6 @@ impl PySessionContext {
         file_compression_type: Option<String>,
         py: Python,
     ) -> PyResult<PyDataFrame> {
-        let path = path
-            .to_str()
-            .ok_or_else(|| PyValueError::new_err("Unable to convert path to a string"))?;
-
         let delimiter = delimiter.as_bytes();
         if delimiter.len() != 1 {
             return Err(PyValueError::new_err(
@@ -833,13 +849,16 @@ impl PySessionContext {
             .file_extension(file_extension)
             .table_partition_cols(convert_table_partition_cols(table_partition_cols)?)
             .file_compression_type(parse_file_compression_type(file_compression_type)?);
+        options.schema = schema.as_ref().map(|x| &x.0);
 
-        if let Some(py_schema) = schema {
-            options.schema = Some(&py_schema.0);
-            let result = self.ctx.read_csv(path, options);
+        if path.is_instance_of::<PyList>() {
+            let paths = path.extract::<Vec<String>>()?;
+            let paths = paths.iter().map(|p| p as &str).collect::<Vec<&str>>();
+            let result = self.ctx.read_csv(paths, options);
             let df = PyDataFrame::new(wait_for_future(py, result).map_err(DataFusionError::from)?);
             Ok(df)
         } else {
+            let path = path.extract::<String>()?;
             let result = self.ctx.read_csv(path, options);
             let df = PyDataFrame::new(wait_for_future(py, result).map_err(DataFusionError::from)?);
             Ok(df)

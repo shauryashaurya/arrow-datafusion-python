@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+"""The default input source for DataFusion."""
+
 import os
 import glob
 from typing import Any
@@ -24,12 +26,13 @@ from datafusion.input.base import BaseInputSource
 
 
 class LocationInputPlugin(BaseInputSource):
-    """
-    Input Plugin for everything, which can be read
-    in from a file (on disk, remote etc.)
+    """Input Plugin for everything.
+
+    This can be read in from a file (on disk, remote etc.).
     """
 
     def is_correct_input(self, input_item: Any, table_name: str, **kwargs):
+        """Returns `True` if the input is valid."""
         return isinstance(input_item, str)
 
     def build_table(
@@ -38,6 +41,7 @@ class LocationInputPlugin(BaseInputSource):
         table_name: str,
         **kwargs,
     ) -> SqlTable:
+        """Create a table from the input source."""
         _, extension = os.path.splitext(input_file)
         format = extension.lstrip(".").lower()
         num_rows = 0  # Total number of rows in the file. Used for statistics
@@ -62,7 +66,7 @@ class LocationInputPlugin(BaseInputSource):
             # Consume header row and count number of rows for statistics.
             # TODO: Possibly makes sense to have the eager number of rows
             # calculated as a configuration since you must read the entire file
-            # to get that information. However, this should only be occuring
+            # to get that information. However, this should only be occurring
             # at table creation time and therefore shouldn't
             # slow down query performance.
             with open(input_file, "r") as file:
@@ -71,7 +75,7 @@ class LocationInputPlugin(BaseInputSource):
                 print(header_row)
                 for _ in reader:
                     num_rows += 1
-            # TODO: Need to actually consume this row into resonable columns
+            # TODO: Need to actually consume this row into reasonable columns
             raise RuntimeError("TODO: Currently unable to support CSV input files.")
         else:
             raise RuntimeError(

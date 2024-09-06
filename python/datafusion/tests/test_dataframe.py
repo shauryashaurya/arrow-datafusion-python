@@ -15,8 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 import os
+from typing import Any
 
 import pyarrow as pa
+from pyarrow.csv import write_csv
 import pyarrow.parquet as pq
 import pytest
 
@@ -46,7 +48,7 @@ def df():
         names=["a", "b", "c"],
     )
 
-    return ctx.create_dataframe([[batch]])
+    return ctx.from_arrow(batch)
 
 
 @pytest.fixture
@@ -83,6 +85,23 @@ def aggregate_df():
     return ctx.sql("select c1, sum(c2) from test group by c1")
 
 
+@pytest.fixture
+def partitioned_df():
+    ctx = SessionContext()
+
+    # create a RecordBatch and a new DataFrame from it
+    batch = pa.RecordBatch.from_arrays(
+        [
+            pa.array([0, 1, 2, 3, 4, 5, 6]),
+            pa.array([7, None, 7, 8, 9, None, 9]),
+            pa.array(["A", "A", "A", "A", "B", "B", "B"]),
+        ],
+        names=["a", "b", "c"],
+    )
+
+    return ctx.create_dataframe([[batch]])
+
+
 def test_select(df):
     df = df.select(
         column("a") + column("b"),
@@ -96,6 +115,16 @@ def test_select(df):
     assert result.column(1) == pa.array([-3, -3, -3])
 
 
+def test_select_mixed_expr_string(df):
+    df = df.select_columns(column("b"), "a")
+
+    # execute and collect the first (and only) batch
+    result = df.collect()[0]
+
+    assert result.column(0) == pa.array([4, 5, 6])
+    assert result.column(1) == pa.array([1, 2, 3])
+
+
 def test_select_columns(df):
     df = df.select_columns("b", "a")
 
@@ -107,16 +136,28 @@ def test_select_columns(df):
 
 
 def test_filter(df):
-    df = df.filter(column("a") > literal(2)).select(
+    df1 = df.filter(column("a") > literal(2)).select(
         column("a") + column("b"),
         column("a") - column("b"),
     )
 
     # execute and collect the first (and only) batch
-    result = df.collect()[0]
+    result = df1.collect()[0]
 
     assert result.column(0) == pa.array([9])
     assert result.column(1) == pa.array([-3])
+
+    df.show()
+    # verify that if there is no filter applied, internal dataframe is unchanged
+    df2 = df.filter()
+    assert df.df == df2.df
+
+    df3 = df.filter(column("a") > literal(1), column("b") != literal(6))
+    result = df3.collect()[0]
+
+    assert result.column(0) == pa.array([2])
+    assert result.column(1) == pa.array([5])
+    assert result.column(2) == pa.array([5])
 
 
 def test_sort(df):
@@ -175,7 +216,7 @@ def test_with_column_renamed(df):
 
 
 def test_unnest(nested_df):
-    nested_df = nested_df.unnest_column("a")
+    nested_df = nested_df.unnest_columns("a")
 
     # execute and collect the first (and only) batch
     result = nested_df.collect()[0]
@@ -185,7 +226,7 @@ def test_unnest(nested_df):
 
 
 def test_unnest_without_nulls(nested_df):
-    nested_df = nested_df.unnest_column("a", preserve_nulls=False)
+    nested_df = nested_df.unnest_columns("a", preserve_nulls=False)
 
     # execute and collect the first (and only) batch
     result = nested_df.collect()[0]
@@ -226,7 +267,7 @@ def test_join():
 
     df = df.join(df1, join_keys=(["a"], ["a"]), how="inner")
     df.show()
-    df = df.sort(column("l.a").sort(ascending=True))
+    df = df.sort(column("l.a"))
     table = pa.Table.from_batches(df.collect())
 
     expected = {"a": [1, 2], "c": [8, 10], "b": [4, 5]}
@@ -240,98 +281,163 @@ def test_distinct():
         [pa.array([1, 2, 3, 1, 2, 3]), pa.array([4, 5, 6, 4, 5, 6])],
         names=["a", "b"],
     )
-    df_a = (
-        ctx.create_dataframe([[batch]])
-        .distinct()
-        .sort(column("a").sort(ascending=True))
-    )
+    df_a = ctx.create_dataframe([[batch]]).distinct().sort(column("a"))
 
     batch = pa.RecordBatch.from_arrays(
         [pa.array([1, 2, 3]), pa.array([4, 5, 6])],
         names=["a", "b"],
     )
-    df_b = ctx.create_dataframe([[batch]]).sort(column("a").sort(ascending=True))
+    df_b = ctx.create_dataframe([[batch]]).sort(column("a"))
 
     assert df_a.collect() == df_b.collect()
 
 
-def test_window_functions(df):
-    df = df.select(
-        column("a"),
-        column("b"),
-        column("c"),
-        f.alias(
-            f.window("row_number", [], order_by=[f.order_by(column("c"))]),
-            "row",
+data_test_window_functions = [
+    (
+        "row",
+        f.row_number(order_by=[column("b"), column("a").sort(ascending=False)]),
+        [4, 2, 3, 5, 7, 1, 6],
+    ),
+    (
+        "row_w_params",
+        f.row_number(
+            order_by=[column("b"), column("a")],
+            partition_by=[column("c")],
         ),
-        f.alias(
-            f.window("rank", [], order_by=[f.order_by(column("c"))]),
-            "rank",
-        ),
-        f.alias(
-            f.window("dense_rank", [], order_by=[f.order_by(column("c"))]),
-            "dense_rank",
-        ),
-        f.alias(
-            f.window("percent_rank", [], order_by=[f.order_by(column("c"))]),
-            "percent_rank",
-        ),
-        f.alias(
-            f.window("cume_dist", [], order_by=[f.order_by(column("b"))]),
-            "cume_dist",
-        ),
-        f.alias(
-            f.window("ntile", [literal(2)], order_by=[f.order_by(column("c"))]),
-            "ntile",
-        ),
-        f.alias(
-            f.window("lag", [column("b")], order_by=[f.order_by(column("b"))]),
-            "previous",
-        ),
-        f.alias(
-            f.window("lead", [column("b")], order_by=[f.order_by(column("b"))]),
-            "next",
-        ),
-        f.alias(
-            f.window(
-                "first_value",
-                [column("a")],
-                order_by=[f.order_by(column("b"))],
+        [2, 1, 3, 4, 2, 1, 3],
+    ),
+    ("rank", f.rank(order_by=[column("b")]), [3, 1, 3, 5, 6, 1, 6]),
+    (
+        "rank_w_params",
+        f.rank(order_by=[column("b"), column("a")], partition_by=[column("c")]),
+        [2, 1, 3, 4, 2, 1, 3],
+    ),
+    (
+        "dense_rank",
+        f.dense_rank(order_by=[column("b")]),
+        [2, 1, 2, 3, 4, 1, 4],
+    ),
+    (
+        "dense_rank_w_params",
+        f.dense_rank(order_by=[column("b"), column("a")], partition_by=[column("c")]),
+        [2, 1, 3, 4, 2, 1, 3],
+    ),
+    (
+        "percent_rank",
+        f.round(f.percent_rank(order_by=[column("b")]), literal(3)),
+        [0.333, 0.0, 0.333, 0.667, 0.833, 0.0, 0.833],
+    ),
+    (
+        "percent_rank_w_params",
+        f.round(
+            f.percent_rank(
+                order_by=[column("b"), column("a")], partition_by=[column("c")]
             ),
+            literal(3),
+        ),
+        [0.333, 0.0, 0.667, 1.0, 0.5, 0.0, 1.0],
+    ),
+    (
+        "cume_dist",
+        f.round(f.cume_dist(order_by=[column("b")]), literal(3)),
+        [0.571, 0.286, 0.571, 0.714, 1.0, 0.286, 1.0],
+    ),
+    (
+        "cume_dist_w_params",
+        f.round(
+            f.cume_dist(
+                order_by=[column("b"), column("a")], partition_by=[column("c")]
+            ),
+            literal(3),
+        ),
+        [0.5, 0.25, 0.75, 1.0, 0.667, 0.333, 1.0],
+    ),
+    (
+        "ntile",
+        f.ntile(2, order_by=[column("b")]),
+        [1, 1, 1, 2, 2, 1, 2],
+    ),
+    (
+        "ntile_w_params",
+        f.ntile(2, order_by=[column("b"), column("a")], partition_by=[column("c")]),
+        [1, 1, 2, 2, 1, 1, 2],
+    ),
+    ("lead", f.lead(column("b"), order_by=[column("b")]), [7, None, 8, 9, 9, 7, None]),
+    (
+        "lead_w_params",
+        f.lead(
+            column("b"),
+            shift_offset=2,
+            default_value=-1,
+            order_by=[column("b"), column("a")],
+            partition_by=[column("c")],
+        ),
+        [8, 7, -1, -1, -1, 9, -1],
+    ),
+    ("lag", f.lag(column("b"), order_by=[column("b")]), [None, None, 7, 7, 8, None, 9]),
+    (
+        "lag_w_params",
+        f.lag(
+            column("b"),
+            shift_offset=2,
+            default_value=-1,
+            order_by=[column("b"), column("a")],
+            partition_by=[column("c")],
+        ),
+        [-1, -1, None, 7, -1, -1, None],
+    ),
+    # TODO update all aggregate functions as windows once upstream merges https://github.com/apache/datafusion-python/issues/833
+    pytest.param(
+        "first_value",
+        f.window(
             "first_value",
+            [column("a")],
+            order_by=[f.order_by(column("b"))],
+            partition_by=[column("c")],
         ),
-        f.alias(
-            f.window("last_value", [column("b")], order_by=[f.order_by(column("b"))]),
-            "last_value",
+        [1, 1, 1, 1, 5, 5, 5],
+    ),
+    pytest.param(
+        "last_value",
+        f.window("last_value", [column("a")])
+        .window_frame(WindowFrame("rows", 0, None))
+        .order_by(column("b"))
+        .partition_by(column("c"))
+        .build(),
+        [3, 3, 3, 3, 6, 6, 6],
+    ),
+    pytest.param(
+        "3rd_value",
+        f.window(
+            "nth_value",
+            [column("b"), literal(3)],
+            order_by=[f.order_by(column("a"))],
         ),
-        f.alias(
-            f.window(
-                "nth_value",
-                [column("b"), literal(2)],
-                order_by=[f.order_by(column("b"))],
-            ),
-            "2nd_value",
-        ),
-    )
+        [None, None, 7, 7, 7, 7, 7],
+    ),
+    pytest.param(
+        "avg",
+        f.round(f.window("avg", [column("b")], order_by=[column("a")]), literal(3)),
+        [7.0, 7.0, 7.0, 7.333, 7.75, 7.75, 8.0],
+    ),
+]
 
+
+@pytest.mark.parametrize("name,expr,result", data_test_window_functions)
+def test_window_functions(partitioned_df, name, expr, result):
+    df = partitioned_df.select(
+        column("a"), column("b"), column("c"), f.alias(expr, name)
+    )
+    df.sort(column("a")).show()
     table = pa.Table.from_batches(df.collect())
 
     expected = {
-        "a": [1, 2, 3],
-        "b": [4, 5, 6],
-        "c": [8, 5, 8],
-        "row": [2, 1, 3],
-        "rank": [2, 1, 2],
-        "dense_rank": [2, 1, 2],
-        "percent_rank": [0.5, 0, 0.5],
-        "cume_dist": [0.3333333333333333, 0.6666666666666666, 1.0],
-        "ntile": [1, 1, 2],
-        "next": [5, 6, None],
-        "previous": [None, 4, 5],
-        "first_value": [1, 1, 1],
-        "last_value": [4, 5, 6],
-        "2nd_value": [None, 5, 5],
+        "a": [0, 1, 2, 3, 4, 5, 6],
+        "b": [7, None, 7, 8, 9, None, 9],
+        "c": ["A", "A", "A", "A", "B", "B", "B"],
+        name: result,
     }
+
     assert table.sort_by("a").to_pydict() == expected
 
 
@@ -379,7 +485,7 @@ def test_get_dataframe(tmp_path):
         ],
         names=["int", "str", "float"],
     )
-    pa.csv.write_csv(table, path)
+    write_csv(table, path)
 
     ctx.register_csv("csv", path)
 
@@ -411,13 +517,13 @@ def test_explain(df):
 def test_logical_plan(aggregate_df):
     plan = aggregate_df.logical_plan()
 
-    expected = "Projection: test.c1, SUM(test.c2)"
+    expected = "Projection: test.c1, sum(test.c2)"
 
     assert expected == plan.display()
 
     expected = (
-        "Projection: test.c1, SUM(test.c2)\n"
-        "  Aggregate: groupBy=[[test.c1]], aggr=[[SUM(test.c2)]]\n"
+        "Projection: test.c1, sum(test.c2)\n"
+        "  Aggregate: groupBy=[[test.c1]], aggr=[[sum(test.c2)]]\n"
         "    TableScan: test"
     )
 
@@ -427,12 +533,12 @@ def test_logical_plan(aggregate_df):
 def test_optimized_logical_plan(aggregate_df):
     plan = aggregate_df.optimized_logical_plan()
 
-    expected = "Aggregate: groupBy=[[test.c1]], aggr=[[SUM(test.c2)]]"
+    expected = "Aggregate: groupBy=[[test.c1]], aggr=[[sum(test.c2)]]"
 
     assert expected == plan.display()
 
     expected = (
-        "Aggregate: groupBy=[[test.c1]], aggr=[[SUM(test.c2)]]\n"
+        "Aggregate: groupBy=[[test.c1]], aggr=[[sum(test.c2)]]\n"
         "  TableScan: test projection=[c1, c2]"
     )
 
@@ -443,7 +549,7 @@ def test_execution_plan(aggregate_df):
     plan = aggregate_df.execution_plan()
 
     expected = (
-        "AggregateExec: mode=FinalPartitioned, gby=[c1@0 as c1], aggr=[SUM(test.c2)]\n"  # noqa: E501
+        "AggregateExec: mode=FinalPartitioned, gby=[c1@0 as c1], aggr=[sum(test.c2)]\n"  # noqa: E501
     )
 
     assert expected == plan.display()
@@ -503,9 +609,9 @@ def test_intersect():
         [pa.array([3]), pa.array([6])],
         names=["a", "b"],
     )
-    df_c = ctx.create_dataframe([[batch]]).sort(column("a").sort(ascending=True))
+    df_c = ctx.create_dataframe([[batch]]).sort(column("a"))
 
-    df_a_i_b = df_a.intersect(df_b).sort(column("a").sort(ascending=True))
+    df_a_i_b = df_a.intersect(df_b).sort(column("a"))
 
     assert df_c.collect() == df_a_i_b.collect()
 
@@ -529,9 +635,9 @@ def test_except_all():
         [pa.array([1, 2]), pa.array([4, 5])],
         names=["a", "b"],
     )
-    df_c = ctx.create_dataframe([[batch]]).sort(column("a").sort(ascending=True))
+    df_c = ctx.create_dataframe([[batch]]).sort(column("a"))
 
-    df_a_e_b = df_a.except_all(df_b).sort(column("a").sort(ascending=True))
+    df_a_e_b = df_a.except_all(df_b).sort(column("a"))
 
     assert df_c.collect() == df_a_e_b.collect()
 
@@ -564,9 +670,9 @@ def test_union(ctx):
         [pa.array([1, 2, 3, 3, 4, 5]), pa.array([4, 5, 6, 6, 7, 8])],
         names=["a", "b"],
     )
-    df_c = ctx.create_dataframe([[batch]]).sort(column("a").sort(ascending=True))
+    df_c = ctx.create_dataframe([[batch]]).sort(column("a"))
 
-    df_a_u_b = df_a.union(df_b).sort(column("a").sort(ascending=True))
+    df_a_u_b = df_a.union(df_b).sort(column("a"))
 
     assert df_c.collect() == df_a_u_b.collect()
 
@@ -588,9 +694,9 @@ def test_union_distinct(ctx):
         [pa.array([1, 2, 3, 4, 5]), pa.array([4, 5, 6, 7, 8])],
         names=["a", "b"],
     )
-    df_c = ctx.create_dataframe([[batch]]).sort(column("a").sort(ascending=True))
+    df_c = ctx.create_dataframe([[batch]]).sort(column("a"))
 
-    df_a_u_b = df_a.union(df_b, True).sort(column("a").sort(ascending=True))
+    df_a_u_b = df_a.union(df_b, True).sort(column("a"))
 
     assert df_c.collect() == df_a_u_b.collect()
     assert df_c.collect() == df_a_u_b.collect()
@@ -611,7 +717,7 @@ def test_to_pandas(df):
 
     # Convert datafusion dataframe to pandas dataframe
     pandas_df = df.to_pandas()
-    assert type(pandas_df) == pd.DataFrame
+    assert isinstance(pandas_df, pd.DataFrame)
     assert pandas_df.shape == (3, 3)
     assert set(pandas_df.columns) == {"a", "b", "c"}
 
@@ -622,7 +728,7 @@ def test_empty_to_pandas(df):
 
     # Convert empty datafusion dataframe to pandas dataframe
     pandas_df = df.limit(0).to_pandas()
-    assert type(pandas_df) == pd.DataFrame
+    assert isinstance(pandas_df, pd.DataFrame)
     assert pandas_df.shape == (0, 3)
     assert set(pandas_df.columns) == {"a", "b", "c"}
 
@@ -633,7 +739,7 @@ def test_to_polars(df):
 
     # Convert datafusion dataframe to polars dataframe
     polars_df = df.to_polars()
-    assert type(polars_df) == pl.DataFrame
+    assert isinstance(polars_df, pl.DataFrame)
     assert polars_df.shape == (3, 3)
     assert set(polars_df.columns) == {"a", "b", "c"}
 
@@ -644,7 +750,7 @@ def test_empty_to_polars(df):
 
     # Convert empty datafusion dataframe to polars dataframe
     polars_df = df.limit(0).to_polars()
-    assert type(polars_df) == pl.DataFrame
+    assert isinstance(polars_df, pl.DataFrame)
     assert polars_df.shape == (0, 3)
     assert set(polars_df.columns) == {"a", "b", "c"}
 
@@ -652,13 +758,15 @@ def test_empty_to_polars(df):
 def test_to_arrow_table(df):
     # Convert datafusion dataframe to pyarrow Table
     pyarrow_table = df.to_arrow_table()
-    assert type(pyarrow_table) == pa.Table
+    assert isinstance(pyarrow_table, pa.Table)
     assert pyarrow_table.shape == (3, 3)
     assert set(pyarrow_table.column_names) == {"a", "b", "c"}
 
 
 def test_execute_stream(df):
     stream = df.execute_stream()
+    for s in stream:
+        print(type(s))
     assert all(batch is not None for batch in stream)
     assert not list(stream)  # after one iteration the generator must be exhausted
 
@@ -690,7 +798,7 @@ def test_execute_stream_partitioned(df):
 def test_empty_to_arrow_table(df):
     # Convert empty datafusion dataframe to pyarrow Table
     pyarrow_table = df.limit(0).to_arrow_table()
-    assert type(pyarrow_table) == pa.Table
+    assert isinstance(pyarrow_table, pa.Table)
     assert pyarrow_table.shape == (0, 3)
     assert set(pyarrow_table.column_names) == {"a", "b", "c"}
 
@@ -736,8 +844,35 @@ def test_describe(df):
     }
 
 
-def test_write_parquet(df, tmp_path):
-    path = tmp_path
+@pytest.mark.parametrize("path_to_str", (True, False))
+def test_write_csv(ctx, df, tmp_path, path_to_str):
+    path = str(tmp_path) if path_to_str else tmp_path
+
+    df.write_csv(path, with_header=True)
+
+    ctx.register_csv("csv", path)
+    result = ctx.table("csv").to_pydict()
+    expected = df.to_pydict()
+
+    assert result == expected
+
+
+@pytest.mark.parametrize("path_to_str", (True, False))
+def test_write_json(ctx, df, tmp_path, path_to_str):
+    path = str(tmp_path) if path_to_str else tmp_path
+
+    df.write_json(path)
+
+    ctx.register_json("json", path)
+    result = ctx.table("json").to_pydict()
+    expected = df.to_pydict()
+
+    assert result == expected
+
+
+@pytest.mark.parametrize("path_to_str", (True, False))
+def test_write_parquet(df, tmp_path, path_to_str):
+    path = str(tmp_path) if path_to_str else tmp_path
 
     df.write_parquet(str(path))
     result = pq.read_table(str(path)).to_pydict()
@@ -795,3 +930,75 @@ def test_write_compressed_parquet_missing_compression_level(df, tmp_path, compre
 
     with pytest.raises(ValueError):
         df.write_parquet(str(path), compression=compression)
+
+
+def test_dataframe_export(df) -> None:
+    # Guarantees that we have the canonical implementation
+    # reading our dataframe export
+    table = pa.table(df)
+    assert table.num_columns == 3
+    assert table.num_rows == 3
+
+    desired_schema = pa.schema([("a", pa.int64())])
+
+    # Verify we can request a schema
+    table = pa.table(df, schema=desired_schema)
+    assert table.num_columns == 1
+    assert table.num_rows == 3
+
+    # Expect a table of nulls if the schema don't overlap
+    desired_schema = pa.schema([("g", pa.string())])
+    table = pa.table(df, schema=desired_schema)
+    assert table.num_columns == 1
+    assert table.num_rows == 3
+    for i in range(0, 3):
+        assert table[0][i].as_py() is None
+
+    # Expect an error when we cannot convert schema
+    desired_schema = pa.schema([("a", pa.float32())])
+    failed_convert = False
+    try:
+        table = pa.table(df, schema=desired_schema)
+    except Exception:
+        failed_convert = True
+    assert failed_convert
+
+    # Expect an error when we have a not set non-nullable
+    desired_schema = pa.schema([("g", pa.string(), False)])
+    failed_convert = False
+    try:
+        table = pa.table(df, schema=desired_schema)
+    except Exception:
+        failed_convert = True
+    assert failed_convert
+
+
+def test_dataframe_transform(df):
+    def add_string_col(df_internal) -> DataFrame:
+        return df_internal.with_column("string_col", literal("string data"))
+
+    def add_with_parameter(df_internal, value: Any) -> DataFrame:
+        return df_internal.with_column("new_col", literal(value))
+
+    df = df.transform(add_string_col).transform(add_with_parameter, 3)
+
+    result = df.to_pydict()
+
+    assert result["a"] == [1, 2, 3]
+    assert result["string_col"] == ["string data" for _i in range(0, 3)]
+    assert result["new_col"] == [3 for _i in range(0, 3)]
+
+
+def test_dataframe_repr_html(df) -> None:
+    output = df._repr_html_()
+
+    ref_html = """<table border='1'>
+        <tr><th>a</td><th>b</td><th>c</td></tr>
+        <tr><td>1</td><td>4</td><td>8</td></tr>
+        <tr><td>2</td><td>5</td><td>5</td></tr>
+        <tr><td>3</td><td>6</td><td>8</td></tr>
+        </table>
+        """
+
+    # Ignore whitespace just to make this test look cleaner
+    assert output.replace(" ", "") == ref_html.replace(" ", "")

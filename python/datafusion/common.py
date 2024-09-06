@@ -14,10 +14,36 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+"""Common data types used throughout the DataFusion project."""
 
+from ._internal import common as common_internal
 
-from ._internal import common
+# TODO these should all have proper wrapper classes
 
+DFSchema = common_internal.DFSchema
+DataType = common_internal.DataType
+DataTypeMap = common_internal.DataTypeMap
+NullTreatment = common_internal.NullTreatment
+PythonType = common_internal.PythonType
+RexType = common_internal.RexType
+SqlFunction = common_internal.SqlFunction
+SqlSchema = common_internal.SqlSchema
+SqlStatistics = common_internal.SqlStatistics
+SqlTable = common_internal.SqlTable
+SqlType = common_internal.SqlType
+SqlView = common_internal.SqlView
 
-def __getattr__(name):
-    return getattr(common, name)
+__all__ = [
+    "DFSchema",
+    "DataType",
+    "DataTypeMap",
+    "RexType",
+    "PythonType",
+    "SqlType",
+    "NullTreatment",
+    "SqlTable",
+    "SqlSchema",
+    "SqlView",
+    "SqlStatistics",
+    "SqlFunction",
+]

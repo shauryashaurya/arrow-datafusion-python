@@ -22,3 +22,5 @@ maturin
 jinja2
 ipython
 pandas
+pickleshare
+sphinx-autoapi

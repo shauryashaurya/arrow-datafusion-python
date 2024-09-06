@@ -15,11 +15,13 @@
 .. specific language governing permissions and limitations
 .. under the License.
 
+.. _aggregation:
+
 Aggregation
 ============
 
 An aggregate or aggregation is a function where the values of multiple rows are processed together to form a single summary value.
-For performing an aggregation, DataFusion provides the :meth:`.DataFrame.aggregate`
+For performing an aggregation, DataFusion provides the :py:func:`~datafusion.dataframe.DataFrame.aggregate`
 
 .. ipython:: python
 

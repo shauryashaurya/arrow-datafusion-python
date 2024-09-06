@@ -18,6 +18,7 @@
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_expr::sqlparser::ast::NullTreatment as DFNullTreatment;
 use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::errors::py_datafusion_err;
@@ -39,7 +40,7 @@ pub enum RexType {
 /// Arrow types which represents the underlying arrow format
 /// Python types which represent the type in Python
 /// It is important to keep all of those types in a single
-/// and managable location. Therefore this structure exists
+/// and manageable location. Therefore this structure exists
 /// to map those types and provide a simple place for developers
 /// to map types from one system to another.
 #[derive(Debug, Clone)]
@@ -132,7 +133,7 @@ impl DataTypeMap {
                 SqlType::FLOAT,
             )),
             DataType::Timestamp(unit, tz) => Ok(DataTypeMap::new(
-                DataType::Timestamp(unit.clone(), tz.clone()),
+                DataType::Timestamp(*unit, tz.clone()),
                 PythonType::Datetime,
                 SqlType::DATE,
             )),
@@ -147,12 +148,12 @@ impl DataTypeMap {
                 SqlType::DATE,
             )),
             DataType::Time32(unit) => Ok(DataTypeMap::new(
-                DataType::Time32(unit.clone()),
+                DataType::Time32(*unit),
                 PythonType::Datetime,
                 SqlType::DATE,
             )),
             DataType::Time64(unit) => Ok(DataTypeMap::new(
-                DataType::Time64(unit.clone()),
+                DataType::Time64(*unit),
                 PythonType::Datetime,
                 SqlType::DATE,
             )),
@@ -160,7 +161,7 @@ impl DataTypeMap {
                 format!("{:?}", arrow_type),
             ))),
             DataType::Interval(interval_unit) => Ok(DataTypeMap::new(
-                DataType::Interval(interval_unit.clone()),
+                DataType::Interval(*interval_unit),
                 PythonType::Datetime,
                 match interval_unit {
                     IntervalUnit::DayTime => SqlType::INTERVAL_DAY,
@@ -325,6 +326,11 @@ impl DataTypeMap {
             ScalarValue::DurationNanosecond(_) => Ok(DataType::Duration(TimeUnit::Nanosecond)),
             ScalarValue::Union(_, _, _) => Err(py_datafusion_err(DataFusionError::NotImplemented(
                 "ScalarValue::LargeList".to_string(),
+            ))),
+            ScalarValue::Utf8View(_) => Ok(DataType::Utf8View),
+            ScalarValue::BinaryView(_) => Ok(DataType::BinaryView),
+            ScalarValue::Map(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
+                "ScalarValue::Map".to_string(),
             ))),
         }
     }
@@ -764,26 +770,26 @@ pub enum SqlType {
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "PythonType", module = "datafusion.common")]
+#[pyclass(name = "NullTreatment", module = "datafusion.common")]
 pub enum NullTreatment {
     IGNORE_NULLS,
     RESPECT_NULLS,
 }
 
-impl From<NullTreatment> for sqlparser::ast::NullTreatment {
-    fn from(null_treatment: NullTreatment) -> sqlparser::ast::NullTreatment {
+impl From<NullTreatment> for DFNullTreatment {
+    fn from(null_treatment: NullTreatment) -> DFNullTreatment {
         match null_treatment {
-            NullTreatment::IGNORE_NULLS => sqlparser::ast::NullTreatment::IgnoreNulls,
-            NullTreatment::RESPECT_NULLS => sqlparser::ast::NullTreatment::RespectNulls,
+            NullTreatment::IGNORE_NULLS => DFNullTreatment::IgnoreNulls,
+            NullTreatment::RESPECT_NULLS => DFNullTreatment::RespectNulls,
         }
     }
 }
 
-impl From<sqlparser::ast::NullTreatment> for NullTreatment {
-    fn from(null_treatment: sqlparser::ast::NullTreatment) -> NullTreatment {
+impl From<DFNullTreatment> for NullTreatment {
+    fn from(null_treatment: DFNullTreatment) -> NullTreatment {
         match null_treatment {
-            sqlparser::ast::NullTreatment::IgnoreNulls => NullTreatment::IGNORE_NULLS,
-            sqlparser::ast::NullTreatment::RespectNulls => NullTreatment::RESPECT_NULLS,
+            DFNullTreatment::IgnoreNulls => NullTreatment::IGNORE_NULLS,
+            DFNullTreatment::RespectNulls => NullTreatment::RESPECT_NULLS,
         }
     }
 }

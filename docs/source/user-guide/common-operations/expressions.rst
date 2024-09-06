@@ -15,27 +15,29 @@
 .. specific language governing permissions and limitations
 .. under the License.
 
+.. _expressions:
+
 Expressions
 ===========
 
 In DataFusion an expression is an abstraction that represents a computation.
-Expressions are used as the primary inputs and ouputs for most functions within
+Expressions are used as the primary inputs and outputs for most functions within
 DataFusion. As such, expressions can be combined to create expression trees, a
 concept shared across most compilers and databases.
 
 Column
 ------
 
-The first expression most new users will interact with is the Column, which is created by calling :func:`col`.
-This expression represents a column within a DataFrame. The function :func:`col` takes as in input a string
+The first expression most new users will interact with is the Column, which is created by calling :py:func:`~datafusion.col`.
+This expression represents a column within a DataFrame. The function :py:func:`~datafusion.col` takes as in input a string
 and returns an expression as it's output.
 
 Literal
 -------
 
 Literal expressions represent a single value. These are helpful in a wide range of operations where
-a specific, known value is of interest. You can create a literal expression using the function :func:`lit`.
-The type of the object passed to the :func:`lit` function will be used to convert it to a known data type.
+a specific, known value is of interest. You can create a literal expression using the function :py:func:`~datafusion.lit`.
+The type of the object passed to the :py:func:`~datafusion.lit` function will be used to convert it to a known data type.
 
 In the following example we create expressions for the column named `color` and the literal scalar string `red`.
 The resultant variable `red_units` is itself also an expression.
@@ -58,11 +60,48 @@ examples for the and, or, and not operations.
     heavy_red_units = (col("color") == lit("red")) & (col("weight") > lit(42))
     not_red_units = ~(col("color") == lit("red"))
 
+Arrays
+------
+
+For columns that contain arrays of values, you can access individual elements of the array by index
+using bracket indexing. This is similar to callling the function
+:py:func:`datafusion.functions.array_element`, except that array indexing using brackets is 0 based,
+similar to Python arrays and ``array_element`` is 1 based indexing to be compatible with other SQL
+approaches.
+
+.. ipython:: python
+
+    from datafusion import SessionContext, col
+
+    ctx = SessionContext()
+    df = ctx.from_pydict({"a": [[1, 2, 3], [4, 5, 6]]})
+    df.select(col("a")[0].alias("a0"))
+
+
+.. warning::
+
+    Indexing an element of an array via ``[]`` starts at index 0 whereas
+    :py:func:`~datafusion.functions.array_element` starts at index 1.
+
+Structs
+-------
+
+Columns that contain struct elements can be accessed using the bracket notation as if they were
+Python dictionary style objects. This expects a string key as the parameter passed.
+
+.. ipython:: python
+
+    ctx = SessionContext()
+    data = {"a": [{"size": 15, "color": "green"}, {"size": 10, "color": "blue"}]}
+    df = ctx.from_pydict(data)
+    df.select(col("a")["size"].alias("a_size"))
+
+
 Functions
 ---------
 
 As mentioned before, most functions in DataFusion return an expression at their output. This allows us to create
-a wide variety of expressions built up from other expressions. For example, :func:`.alias` is a function that takes
+a wide variety of expressions built up from other expressions. For example, :py:func:`~datafusion.expr.Expr.alias` is a function that takes
 as it input a single expression and returns an expression in which the name of the expression has changed.
 
 The following example shows a series of expressions that are built up from functions operating on expressions.

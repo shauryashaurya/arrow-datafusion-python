@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from datafusion import SessionContext
+from datafusion import SessionContext, col
 from datafusion.expr import Column, Literal, BinaryExpr, AggregateFunction
 from datafusion.expr import (
     Projection,
@@ -25,6 +25,7 @@ from datafusion.expr import (
     Sort,
     TableScan,
 )
+import pyarrow
 import pytest
 
 
@@ -116,3 +117,78 @@ def test_sort(test_ctx):
 
     plan = plan.to_variant()
     assert isinstance(plan, Sort)
+
+
+def test_relational_expr(test_ctx):
+    ctx = SessionContext()
+
+    batch = pyarrow.RecordBatch.from_arrays(
+        [pyarrow.array([1, 2, 3]), pyarrow.array(["alpha", "beta", "gamma"])],
+        names=["a", "b"],
+    )
+    df = ctx.create_dataframe([[batch]], name="batch_array")
+
+    assert df.filter(col("a") == 1).count() == 1
+    assert df.filter(col("a") != 1).count() == 2
+    assert df.filter(col("a") >= 1).count() == 3
+    assert df.filter(col("a") > 1).count() == 2
+    assert df.filter(col("a") <= 3).count() == 3
+    assert df.filter(col("a") < 3).count() == 2
+
+    assert df.filter(col("b") == "beta").count() == 1
+    assert df.filter(col("b") != "beta").count() == 2
+
+    assert df.filter(col("a") == "beta").count() == 0
+
+
+def test_expr_to_variant():
+    # Taken from https://github.com/apache/datafusion-python/issues/781
+    from datafusion import SessionContext
+    from datafusion.expr import Filter
+
+    def traverse_logical_plan(plan):
+        cur_node = plan.to_variant()
+        if isinstance(cur_node, Filter):
+            return cur_node.predicate().to_variant()
+        if hasattr(plan, "inputs"):
+            for input_plan in plan.inputs():
+                res = traverse_logical_plan(input_plan)
+                if res is not None:
+                    return res
+
+    ctx = SessionContext()
+    data = {"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]}
+    ctx.from_pydict(data, name="table1")
+    query = "SELECT * FROM table1 t1 WHERE t1.name IN ('dfa', 'ad', 'dfre', 'vsa')"
+    logical_plan = ctx.sql(query).optimized_logical_plan()
+    variant = traverse_logical_plan(logical_plan)
+    assert variant is not None
+    assert variant.expr().to_variant().qualified_name() == "table1.name"
+    assert (
+        str(variant.list())
+        == '[Expr(Utf8("dfa")), Expr(Utf8("ad")), Expr(Utf8("dfre")), Expr(Utf8("vsa"))]'
+    )
+    assert not variant.negated()
+
+
+def test_expr_getitem() -> None:
+    ctx = SessionContext()
+    data = {
+        "array_values": [[1, 2, 3], [4, 5], [6], []],
+        "struct_values": [
+            {"name": "Alice", "age": 15},
+            {"name": "Bob", "age": 14},
+            {"name": "Charlie", "age": 13},
+            {"name": None, "age": 12},
+        ],
+    }
+    df = ctx.from_pydict(data, name="table1")
+
+    names = df.select(col("struct_values")["name"].alias("name")).collect()
+    names = [r.as_py() for rs in names for r in rs["name"]]
+
+    array_values = df.select(col("array_values")[1].alias("value")).collect()
+    array_values = [r.as_py() for rs in array_values for r in rs["value"]]
+
+    assert names == ["Alice", "Bob", "Charlie", None]
+    assert array_values == [2, 5, None, None]

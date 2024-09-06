@@ -14,9 +14,21 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
+"""Object store functionality."""
 
 from ._internal import object_store
+
+AmazonS3 = object_store.AmazonS3
+GoogleCloud = object_store.GoogleCloud
+LocalFileSystem = object_store.LocalFileSystem
+MicrosoftAzure = object_store.MicrosoftAzure
+
+__all__ = [
+    "AmazonS3",
+    "GoogleCloud",
+    "LocalFileSystem",
+    "MicrosoftAzure",
+]
 
 
 def __getattr__(name):
