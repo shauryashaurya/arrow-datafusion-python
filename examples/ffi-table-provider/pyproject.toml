@@ -15,32 +15,19 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import os
-import pytest
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
 
-from datafusion import SessionContext
-from datafusion.object_store import LocalFileSystem
+[project]
+name = "ffi_table_provider"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dynamic = ["version"]
 
-
-@pytest.fixture
-def local():
-    return LocalFileSystem()
-
-
-@pytest.fixture
-def ctx(local):
-    ctx = SessionContext()
-    ctx.register_object_store("file://local", local, None)
-    return ctx
-
-
-def test_read_parquet(ctx):
-    ctx.register_parquet(
-        "test",
-        f"file://{os.getcwd()}/parquet/data/alltypes_plain.parquet",
-        [],
-        True,
-        ".parquet",
-    )
-    df = ctx.sql("SELECT * FROM test")
-    assert isinstance(df.collect(), list)
+[tool.maturin]
+features = ["pyo3/extension-module"]

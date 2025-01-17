@@ -25,13 +25,7 @@ We'll use the pokemon dataset in the following examples.
 
 .. ipython:: python
 
-    import urllib.request
     from datafusion import SessionContext
-
-    urllib.request.urlretrieve(
-    "https://gist.githubusercontent.com/ritchie46/cac6b337ea52281aa23c049250a4ff03/raw/89a957ff3919d90e6ef2d34235e6bf22304f3366/pokemon.csv",
-    "pokemon.csv",
-    )
 
     ctx = SessionContext()
     ctx.register_csv("pokemon", "pokemon.csv")
@@ -44,7 +38,7 @@ DataFusion offers mathematical functions such as :py:func:`~datafusion.functions
 
 .. ipython:: python
 
-    from datafusion import col, literal
+    from datafusion import col, literal, string_literal, str_lit
     from datafusion import functions as f
 
     df.select(
@@ -78,6 +72,15 @@ Convert to timestamps using :py:func:`~datafusion.functions.to_timestamp`
 
     df.select(f.to_timestamp(col('"Total"')).alias("timestamp"))
 
+Extracting parts of a date using :py:func:`~datafusion.functions.date_part` (alias :py:func:`~datafusion.functions.extract`)
+
+.. ipython:: python
+
+     df.select(
+        f.date_part(literal("month"), f.to_timestamp(col('"Total"'))).alias("month"),
+        f.extract(literal("day"), f.to_timestamp(col('"Total"'))).alias("day")
+     )
+  
 String
 ------
 
@@ -101,6 +104,17 @@ This also includes the functions for regular expressions like :py:func:`~datafus
         f.regexp_replace(col('"Name"'), literal("saur"), literal("fleur")).alias("flowers")
     )
 
+Casting
+-------
+
+Casting expressions to different data types using :py:func:`~datafusion.functions.arrow_cast`
+
+.. ipython:: python
+
+    df.select(
+        f.arrow_cast(col('"Total"'), string_literal("Float64")).alias("total_as_float"),
+        f.arrow_cast(col('"Total"'), str_lit("Int32")).alias("total_as_int")
+    )
 
 Other
 -----

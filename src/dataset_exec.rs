@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 /// Implements a Datafusion physical ExecutionPlan that delegates to a PyArrow Dataset
 /// This actually performs the projection, filtering and scanning of a Dataset
 use pyo3::prelude::*;
@@ -32,14 +33,14 @@ use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError as InnerDataFusionError, Result as DFResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
+use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::{EquivalenceProperties, LexOrdering};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, ExecutionPlanProperties,
-    Partitioning, SendableRecordBatchStream, Statistics,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
+    SendableRecordBatchStream, Statistics,
 };
-use datafusion_expr::utils::conjunction;
-use datafusion_expr::Expr;
 
 use crate::errors::DataFusionError;
 use crate::pyarrow_filter_expression::PyArrowFilterExpression;
@@ -53,7 +54,7 @@ impl Iterator for PyArrowBatchesAdapter {
 
     fn next(&mut self) -> Option<Self::Item> {
         Python::with_gil(|py| {
-            let mut batches = self.batches.clone().into_bound(py);
+            let mut batches = self.batches.clone_ref(py).into_bound(py);
             Some(
                 batches
                     .next()?
@@ -65,7 +66,7 @@ impl Iterator for PyArrowBatchesAdapter {
 }
 
 // Wraps a pyarrow.dataset.Dataset class and implements a Datafusion ExecutionPlan around it
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct DatasetExec {
     dataset: PyObject,
     schema: SchemaRef,
@@ -136,7 +137,8 @@ impl DatasetExec {
         let plan_properties = datafusion::physical_plan::PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(fragments.len()),
-            ExecutionMode::Bounded,
+            EmissionType::Final,
+            Boundedness::Bounded,
         );
 
         Ok(DatasetExec {
@@ -251,12 +253,16 @@ impl ExecutionPlanProperties for DatasetExec {
         self.plan_properties.output_partitioning()
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+    fn output_ordering(&self) -> Option<&LexOrdering> {
         None
     }
 
-    fn execution_mode(&self) -> datafusion::physical_plan::ExecutionMode {
-        self.plan_properties.execution_mode
+    fn boundedness(&self) -> Boundedness {
+        self.plan_properties.boundedness
+    }
+
+    fn pipeline_behavior(&self) -> EmissionType {
+        self.plan_properties.emission_type
     }
 
     fn equivalence_properties(&self) -> &datafusion::physical_expr::EquivalenceProperties {

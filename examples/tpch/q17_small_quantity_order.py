@@ -38,10 +38,10 @@ CONTAINER = "MED BOX"
 
 ctx = SessionContext()
 
-df_part = ctx.read_parquet(get_data_path("part.parquet")).select_columns(
+df_part = ctx.read_parquet(get_data_path("part.parquet")).select(
     "p_partkey", "p_brand", "p_container"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_partkey", "l_quantity", "l_extendedprice"
 )
 
@@ -51,7 +51,7 @@ df = df_part.filter(col("p_brand") == lit(BRAND)).filter(
 )
 
 # Combine data
-df = df.join(df_lineitem, (["p_partkey"], ["l_partkey"]), "inner")
+df = df.join(df_lineitem, left_on=["p_partkey"], right_on=["l_partkey"], how="inner")
 
 # Find the average quantity
 window_frame = WindowFrame("rows", None, None)

@@ -29,18 +29,18 @@ except ImportError:
 from .context import (
     SessionContext,
     SessionConfig,
-    RuntimeConfig,
+    RuntimeEnvBuilder,
     SQLOptions,
 )
 
 from .catalog import Catalog, Database, Table
 
 # The following imports are okay to remain as opaque to the user.
-from ._internal import Config, LogicalPlan, ExecutionPlan, runtime
+from ._internal import Config
 
 from .record_batch import RecordBatchStream, RecordBatch
 
-from .udf import ScalarUDF, AggregateUDF, Accumulator
+from .udf import ScalarUDF, AggregateUDF, Accumulator, WindowUDF
 
 from .common import (
     DFSchema,
@@ -53,6 +53,8 @@ from .expr import (
     WindowFrame,
 )
 
+from .plan import LogicalPlan, ExecutionPlan
+
 from . import functions, object_store, substrait
 
 __version__ = importlib_metadata.version(__name__)
@@ -64,7 +66,7 @@ __all__ = [
     "SessionContext",
     "SessionConfig",
     "SQLOptions",
-    "RuntimeConfig",
+    "RuntimeEnvBuilder",
     "Expr",
     "ScalarUDF",
     "WindowFrame",
@@ -73,11 +75,11 @@ __all__ = [
     "literal",
     "lit",
     "DFSchema",
-    "runtime",
     "Catalog",
     "Database",
     "Table",
     "AggregateUDF",
+    "WindowUDF",
     "LogicalPlan",
     "ExecutionPlan",
     "RecordBatch",
@@ -105,6 +107,19 @@ def literal(value):
     return Expr.literal(value)
 
 
+def string_literal(value):
+    """Create a UTF8 literal expression.
+
+    It differs from `literal` which creates a UTF8view literal.
+    """
+    return Expr.string_literal(value)
+
+
+def str_lit(value):
+    """Alias for `string_literal`."""
+    return string_literal(value)
+
+
 def lit(value):
     """Create a literal expression."""
     return Expr.literal(value)
@@ -113,3 +128,5 @@ def lit(value):
 udf = ScalarUDF.udf
 
 udaf = AggregateUDF.udaf
+
+udwf = WindowUDF.udwf

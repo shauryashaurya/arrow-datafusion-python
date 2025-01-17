@@ -17,14 +17,14 @@
 
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
-use datafusion_common::{DataFusionError, ScalarValue};
-use datafusion_expr::sqlparser::ast::NullTreatment as DFNullTreatment;
+use datafusion::common::{DataFusionError, ScalarValue};
+use datafusion::logical_expr::sqlparser::ast::NullTreatment as DFNullTreatment;
 use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::errors::py_datafusion_err;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "RexType", module = "datafusion.common")]
+#[pyclass(eq, eq_int, name = "RexType", module = "datafusion.common")]
 pub enum RexType {
     Alias,
     Literal,
@@ -692,7 +692,7 @@ impl From<DataType> for PyDataType {
 
 /// Represents the possible Python types that can be mapped to the SQL types
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "PythonType", module = "datafusion.common")]
+#[pyclass(eq, eq_int, name = "PythonType", module = "datafusion.common")]
 pub enum PythonType {
     Array,
     Bool,
@@ -712,7 +712,7 @@ pub enum PythonType {
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "SqlType", module = "datafusion.common")]
+#[pyclass(eq, eq_int, name = "SqlType", module = "datafusion.common")]
 pub enum SqlType {
     ANY,
     ARRAY,
@@ -770,7 +770,7 @@ pub enum SqlType {
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "NullTreatment", module = "datafusion.common")]
+#[pyclass(eq, eq_int, name = "NullTreatment", module = "datafusion.common")]
 pub enum NullTreatment {
     IGNORE_NULLS,
     RESPECT_NULLS,

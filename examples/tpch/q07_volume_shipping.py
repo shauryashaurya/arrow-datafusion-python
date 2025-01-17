@@ -49,19 +49,19 @@ end_date = lit(datetime.strptime(END_DATE, "%Y-%m-%d").date())
 
 ctx = SessionContext()
 
-df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select_columns(
+df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select(
     "s_suppkey", "s_nationkey"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_shipdate", "l_extendedprice", "l_discount", "l_suppkey", "l_orderkey"
 )
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_orderkey", "o_custkey"
 )
-df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select_columns(
+df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select(
     "c_custkey", "c_nationkey"
 )
-df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
+df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select(
     "n_nationkey", "n_name"
 )
 
@@ -90,20 +90,22 @@ df_nation = df_nation.with_column(
 
 # Limit suppliers to either nation
 df_supplier = df_supplier.join(
-    df_nation, (["s_nationkey"], ["n_nationkey"]), how="inner"
+    df_nation, left_on=["s_nationkey"], right_on=["n_nationkey"], how="inner"
 ).select(col("s_suppkey"), col("n_name").alias("supp_nation"))
 
 # Limit customers to either nation
 df_customer = df_customer.join(
-    df_nation, (["c_nationkey"], ["n_nationkey"]), how="inner"
+    df_nation, left_on=["c_nationkey"], right_on=["n_nationkey"], how="inner"
 ).select(col("c_custkey"), col("n_name").alias("cust_nation"))
 
 # Join up all the data frames from line items, and make sure the supplier and customer are in
 # different nations.
 df = (
-    df_lineitem.join(df_orders, (["l_orderkey"], ["o_orderkey"]), how="inner")
-    .join(df_customer, (["o_custkey"], ["c_custkey"]), how="inner")
-    .join(df_supplier, (["l_suppkey"], ["s_suppkey"]), how="inner")
+    df_lineitem.join(
+        df_orders, left_on=["l_orderkey"], right_on=["o_orderkey"], how="inner"
+    )
+    .join(df_customer, left_on=["o_custkey"], right_on=["c_custkey"], how="inner")
+    .join(df_supplier, left_on=["l_suppkey"], right_on=["s_suppkey"], how="inner")
     .filter(col("cust_nation") != col("supp_nation"))
 )
 

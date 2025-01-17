@@ -15,8 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_expr::utils::exprlist_to_fields;
-use datafusion_expr::{ExprFuncBuilder, ExprFunctionExt, LogicalPlan};
+use datafusion::logical_expr::utils::exprlist_to_fields;
+use datafusion::logical_expr::{
+    ExprFuncBuilder, ExprFunctionExt, LogicalPlan, WindowFunctionDefinition,
+};
 use pyo3::{basic::CompareOp, prelude::*};
 use std::convert::{From, Into};
 use std::sync::Arc;
@@ -26,12 +28,12 @@ use arrow::pyarrow::ToPyArrow;
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::functions::core::expr_ext::FieldAccessor;
-use datafusion::scalar::ScalarValue;
-use datafusion_expr::{
+use datafusion::logical_expr::{
     col,
-    expr::{AggregateFunction, InList, InSubquery, ScalarFunction, Sort, WindowFunction},
+    expr::{AggregateFunction, InList, InSubquery, ScalarFunction, WindowFunction},
     lit, Between, BinaryExpr, Case, Cast, Expr, Like, Operator, TryCast,
 };
+use datafusion::scalar::ScalarValue;
 
 use crate::common::data_type::{DataTypeMap, NullTreatment, RexType};
 use crate::errors::{py_runtime_err, py_type_err, py_unsupported_variant_err, DataFusionError};
@@ -39,6 +41,7 @@ use crate::expr::aggregate_expr::PyAggregateFunction;
 use crate::expr::binary_expr::PyBinaryExpr;
 use crate::expr::column::PyColumn;
 use crate::expr::literal::PyLiteral;
+use crate::functions::add_builder_fns_to_window;
 use crate::sql::logical::PyLogicalPlan;
 
 use self::alias::PyAlias;
@@ -62,7 +65,6 @@ pub mod column;
 pub mod conditional_expr;
 pub mod create_memory_table;
 pub mod create_view;
-pub mod cross_join;
 pub mod distinct;
 pub mod drop_table;
 pub mod empty_relation;
@@ -93,6 +95,8 @@ pub mod union;
 pub mod unnest;
 pub mod unnest_expr;
 pub mod window;
+
+use sort_expr::{to_sort_expressions, PySortExpr};
 
 /// A PyExpr that can be used on a DataFrame
 #[pyclass(name = "Expr", module = "datafusion.expr", subclass)]
@@ -150,7 +154,6 @@ impl PyExpr {
             Expr::Case(value) => Ok(case::PyCase::from(value.clone()).into_py(py)),
             Expr::Cast(value) => Ok(cast::PyCast::from(value.clone()).into_py(py)),
             Expr::TryCast(value) => Ok(cast::PyTryCast::from(value.clone()).into_py(py)),
-            Expr::Sort(value) => Ok(sort_expr::PySortExpr::from(value.clone()).into_py(py)),
             Expr::ScalarFunction(value) => Err(py_unsupported_variant_err(format!(
                 "Converting Expr::ScalarFunction to a Python object is not implemented: {:?}",
                 value
@@ -167,9 +170,9 @@ impl PyExpr {
             Expr::ScalarSubquery(value) => {
                 Ok(scalar_subquery::PyScalarSubquery::from(value.clone()).into_py(py))
             }
-            Expr::Wildcard { qualifier } => Err(py_unsupported_variant_err(format!(
-                "Converting Expr::Wildcard to a Python object is not implemented : {:?}",
-                qualifier
+            Expr::Wildcard { qualifier, options } => Err(py_unsupported_variant_err(format!(
+                "Converting Expr::Wildcard to a Python object is not implemented : {:?} {:?}",
+                qualifier, options
             ))),
             Expr::GroupingSet(value) => {
                 Ok(grouping_set::PyGroupingSet::from(value.clone()).into_py(py))
@@ -188,13 +191,13 @@ impl PyExpr {
 
     /// Returns the name of this expression as it should appear in a schema. This name
     /// will not include any CAST expressions.
-    fn display_name(&self) -> PyResult<String> {
-        Ok(self.expr.display_name()?)
+    fn schema_name(&self) -> PyResult<String> {
+        Ok(format!("{}", self.expr.schema_name()))
     }
 
     /// Returns a full and complete string representation of this expression.
     fn canonical_name(&self) -> PyResult<String> {
-        Ok(self.expr.canonical_name())
+        Ok(format!("{}", self.expr))
     }
 
     /// Returns the name of the Expr variant.
@@ -274,7 +277,7 @@ impl PyExpr {
 
     /// Create a sort PyExpr from an existing PyExpr.
     #[pyo3(signature = (ascending=true, nulls_first=true))]
-    pub fn sort(&self, ascending: bool, nulls_first: bool) -> PyExpr {
+    pub fn sort(&self, ascending: bool, nulls_first: bool) -> PySortExpr {
         self.expr.clone().sort(ascending, nulls_first).into()
     }
 
@@ -290,6 +293,17 @@ impl PyExpr {
         // self.expr.cast_to() requires DFSchema to validate that the cast
         // is supported, omit that for now
         let expr = Expr::Cast(Cast::new(Box::new(self.expr.clone()), to.0));
+        expr.into()
+    }
+
+    #[pyo3(signature = (low, high, negated=false))]
+    pub fn between(&self, low: PyExpr, high: PyExpr, negated: bool) -> PyExpr {
+        let expr = Expr::Between(Between::new(
+            Box::new(self.expr.clone()),
+            negated,
+            Box::new(low.into()),
+            Box::new(high.into()),
+        ));
         expr.into()
     }
 
@@ -312,7 +326,6 @@ impl PyExpr {
             | Expr::Case { .. }
             | Expr::Cast { .. }
             | Expr::TryCast { .. }
-            | Expr::Sort { .. }
             | Expr::ScalarFunction { .. }
             | Expr::AggregateFunction { .. }
             | Expr::WindowFunction { .. }
@@ -376,7 +389,6 @@ impl PyExpr {
             | Expr::Negative(expr)
             | Expr::Cast(Cast { expr, .. })
             | Expr::TryCast(TryCast { expr, .. })
-            | Expr::Sort(Sort { expr, .. })
             | Expr::InSubquery(InSubquery { expr, .. }) => Ok(vec![PyExpr::from(*expr.clone())]),
 
             // Expr variants containing a collection of Expr(s) for operands
@@ -518,7 +530,7 @@ impl PyExpr {
 
     // Expression Function Builder functions
 
-    pub fn order_by(&self, order_by: Vec<PyExpr>) -> PyExprFuncBuilder {
+    pub fn order_by(&self, order_by: Vec<PySortExpr>) -> PyExprFuncBuilder {
         self.expr
             .clone()
             .order_by(to_sort_expressions(order_by))
@@ -548,6 +560,45 @@ impl PyExpr {
     pub fn window_frame(&self, window_frame: PyWindowFrame) -> PyExprFuncBuilder {
         self.expr.clone().window_frame(window_frame.into()).into()
     }
+
+    #[pyo3(signature = (partition_by=None, window_frame=None, order_by=None, null_treatment=None))]
+    pub fn over(
+        &self,
+        partition_by: Option<Vec<PyExpr>>,
+        window_frame: Option<PyWindowFrame>,
+        order_by: Option<Vec<PySortExpr>>,
+        null_treatment: Option<NullTreatment>,
+    ) -> PyResult<PyExpr> {
+        match &self.expr {
+            Expr::AggregateFunction(agg_fn) => {
+                let window_fn = Expr::WindowFunction(WindowFunction::new(
+                    WindowFunctionDefinition::AggregateUDF(agg_fn.func.clone()),
+                    agg_fn.args.clone(),
+                ));
+
+                add_builder_fns_to_window(
+                    window_fn,
+                    partition_by,
+                    window_frame,
+                    order_by,
+                    null_treatment,
+                )
+            }
+            Expr::WindowFunction(_) => add_builder_fns_to_window(
+                self.expr.clone(),
+                partition_by,
+                window_frame,
+                order_by,
+                null_treatment,
+            ),
+            _ => Err(
+                DataFusionError::ExecutionError(datafusion::error::DataFusionError::Plan(
+                    format!("Using {} with `over` is not allowed. Must use an aggregate or window function.", self.expr.variant_name()),
+                ))
+                .into(),
+            ),
+        }
+    }
 }
 
 #[pyclass(name = "ExprFuncBuilder", module = "datafusion.expr", subclass)]
@@ -562,20 +613,9 @@ impl From<ExprFuncBuilder> for PyExprFuncBuilder {
     }
 }
 
-pub fn to_sort_expressions(order_by: Vec<PyExpr>) -> Vec<Expr> {
-    order_by
-        .iter()
-        .map(|e| e.expr.clone())
-        .map(|e| match e {
-            Expr::Sort(_) => e,
-            _ => e.sort(true, true),
-        })
-        .collect()
-}
-
 #[pymethods]
 impl PyExprFuncBuilder {
-    pub fn order_by(&self, order_by: Vec<PyExpr>) -> PyExprFuncBuilder {
+    pub fn order_by(&self, order_by: Vec<PySortExpr>) -> PyExprFuncBuilder {
         self.builder
             .clone()
             .order_by(to_sort_expressions(order_by))
@@ -630,11 +670,6 @@ impl PyExpr {
         input_plan: &LogicalPlan,
     ) -> Result<Arc<Field>, DataFusionError> {
         match expr {
-            Expr::Sort(Sort { expr, .. }) => {
-                // DataFusion does not support create_name for sort expressions (since they never
-                // appear in projections) so we just delegate to the contained expression instead
-                Self::expr_to_field(expr, input_plan)
-            }
             Expr::Wildcard { .. } => {
                 // Since * could be any of the valid column names just return the first one
                 Ok(Arc::new(input_plan.schema().field(0).clone()))
@@ -739,7 +774,6 @@ pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<join::PyJoin>()?;
     m.add_class::<join::PyJoinType>()?;
     m.add_class::<join::PyJoinConstraint>()?;
-    m.add_class::<cross_join::PyCrossJoin>()?;
     m.add_class::<union::PyUnion>()?;
     m.add_class::<unnest::PyUnnest>()?;
     m.add_class::<unnest_expr::PyUnnestExpr>()?;
@@ -755,7 +789,7 @@ pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<drop_table::PyDropTable>()?;
     m.add_class::<repartition::PyPartitioning>()?;
     m.add_class::<repartition::PyRepartition>()?;
-    m.add_class::<window::PyWindow>()?;
+    m.add_class::<window::PyWindowExpr>()?;
     m.add_class::<window::PyWindowFrame>()?;
     m.add_class::<window::PyWindowFrameBound>()?;
     Ok(())

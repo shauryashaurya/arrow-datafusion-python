@@ -22,7 +22,7 @@ import pyarrow as pa
 from pyarrow.csv import write_csv
 import pyarrow.dataset as ds
 import pytest
-from datafusion.object_store import LocalFileSystem
+from datafusion.object_store import Http
 
 from datafusion import udf, col
 
@@ -102,6 +102,50 @@ def test_register_csv(ctx, tmp_path):
         match="file_compression_type must one of: gzip, bz2, xz, zstd",
     ):
         ctx.register_csv("csv4", path, file_compression_type="rar")
+
+
+def test_register_csv_list(ctx, tmp_path):
+    path = tmp_path / "test.csv"
+
+    int_values = [1, 2, 3, 4]
+    table = pa.Table.from_arrays(
+        [
+            int_values,
+            ["a", "b", "c", "d"],
+            [1.1, 2.2, 3.3, 4.4],
+        ],
+        names=["int", "str", "float"],
+    )
+    write_csv(table, path)
+    ctx.register_csv("csv", path)
+
+    csv_df = ctx.table("csv")
+    expected_count = csv_df.count() * 2
+    ctx.register_csv(
+        "double_csv",
+        path=[
+            path,
+            path,
+        ],
+    )
+
+    double_csv_df = ctx.table("double_csv")
+    actual_count = double_csv_df.count()
+    assert actual_count == expected_count
+
+    int_sum = ctx.sql("select sum(int) from double_csv").to_pydict()[
+        "sum(double_csv.int)"
+    ][0]
+    assert int_sum == 2 * sum(int_values)
+
+
+def test_register_http_csv(ctx):
+    url = "https://raw.githubusercontent.com/ibis-project/testing-data/refs/heads/master/csv/diamonds.csv"
+    ctx.register_object_store("", Http(url))
+    ctx.register_csv("remote", url)
+    assert ctx.table_exist("remote")
+    res, *_ = ctx.sql("SELECT COUNT(*) AS total FROM remote").to_pylist()
+    assert res["total"] > 0
 
 
 def test_register_parquet(ctx, tmp_path):
@@ -264,14 +308,17 @@ def test_execute(ctx, tmp_path):
 
     # count
     result = ctx.sql("SELECT COUNT(a) AS cnt FROM t WHERE a IS NOT NULL").collect()
+    ctx.sql("SELECT COUNT(a) AS cnt FROM t WHERE a IS NOT NULL").show()
 
-    expected = pa.array([7], pa.int64())
-    expected = [pa.RecordBatch.from_arrays([expected], ["cnt"])]
+    expected_schema = pa.schema([("cnt", pa.int64(), False)])
+    expected_values = pa.array([7], type=pa.int64())
+    expected = [pa.RecordBatch.from_arrays([expected_values], schema=expected_schema)]
+
     assert result == expected
 
     # where
-    expected = pa.array([2], pa.int64())
-    expected = [pa.RecordBatch.from_arrays([expected], ["cnt"])]
+    expected_values = pa.array([2], type=pa.int64())
+    expected = [pa.RecordBatch.from_arrays([expected_values], schema=expected_schema)]
     result = ctx.sql("SELECT COUNT(a) AS cnt FROM t WHERE a > 10").collect()
     assert result == expected
 
@@ -375,23 +422,29 @@ _null_mask = np.array([False, True, False])
         helpers.data_binary_other(),
         helpers.data_date32(),
         helpers.data_with_nans(),
-        # C data interface missing
         pytest.param(
             pa.array([b"1111", b"2222", b"3333"], pa.binary(4), _null_mask),
             id="binary4",
-            marks=pytest.mark.xfail,
+        ),
+        # `timestamp[s]` does not roundtrip for pyarrow.parquet: https://github.com/apache/arrow/issues/41382
+        pytest.param(
+            helpers.data_datetime("s"),
+            id="datetime_s",
+            marks=pytest.mark.xfail(
+                reason="pyarrow.parquet does not support timestamp[s] roundtrips"
+            ),
         ),
         pytest.param(
-            helpers.data_datetime("s"), id="datetime_s", marks=pytest.mark.xfail
+            helpers.data_datetime("ms"),
+            id="datetime_ms",
         ),
         pytest.param(
-            helpers.data_datetime("ms"), id="datetime_ms", marks=pytest.mark.xfail
+            helpers.data_datetime("us"),
+            id="datetime_us",
         ),
         pytest.param(
-            helpers.data_datetime("us"), id="datetime_us", marks=pytest.mark.xfail
-        ),
-        pytest.param(
-            helpers.data_datetime("ns"), id="datetime_ns", marks=pytest.mark.xfail
+            helpers.data_datetime("ns"),
+            id="datetime_ns",
         ),
         # Not writtable to parquet
         pytest.param(
@@ -414,6 +467,13 @@ def test_simple_select(ctx, tmp_path, arr):
 
     batches = ctx.sql("SELECT a AS tt FROM t").collect()
     result = batches[0].column(0)
+
+    # In DF 43.0.0 we now default to having BinaryView and StringView
+    # so the array that is saved to the parquet is slightly different
+    # than the array read. Convert to values for comparison.
+    if isinstance(result, pa.BinaryViewArray) or isinstance(result, pa.StringViewArray):
+        arr = arr.tolist()
+        result = result.tolist()
 
     np.testing.assert_equal(result, arr)
 
@@ -450,7 +510,6 @@ def test_register_listing_table(
 
     dir_root = f"file://{dir_root}/" if path_to_str else dir_root
 
-    ctx.register_object_store("file://local", LocalFileSystem(), None)
     ctx.register_listing_table(
         "my_table",
         dir_root,

@@ -22,12 +22,12 @@ use std::convert::TryFrom;
 use std::result::Result;
 
 use arrow::pyarrow::ToPyArrow;
-use datafusion_common::{Column, ScalarValue};
-use datafusion_expr::{expr::InList, Between, BinaryExpr, Expr, Operator};
+use datafusion::common::{Column, ScalarValue};
+use datafusion::logical_expr::{expr::InList, Between, BinaryExpr, Expr, Operator};
 
 use crate::errors::DataFusionError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[repr(transparent)]
 pub(crate) struct PyArrowFilterExpression(PyObject);
 

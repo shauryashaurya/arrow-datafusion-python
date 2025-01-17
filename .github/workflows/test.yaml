@@ -50,9 +50,9 @@ jobs:
           override: true
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v1
+        uses: arduino/setup-protoc@v3
         with:
-          version: '3.20.2'
+          version: '27.4'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
@@ -109,6 +109,15 @@ jobs:
           source venv/bin/activate
           pip install -e . -vv
           pytest -v .
+
+      - name: FFI unit tests
+        run: |
+          source venv/bin/activate
+          pip install -e . -vv
+          pip install maturin==1.5.1
+          cd examples/ffi-table-provider
+          maturin develop --release --strip
+          pytest python/tests/_test_table_provider.py
 
       - name: Cache the generated dataset
         id: cache-tpch-dataset

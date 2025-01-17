@@ -29,8 +29,8 @@ from datafusion import (
     WindowFrame,
     column,
     literal,
-    udf,
 )
+from datafusion.expr import Window
 
 
 @pytest.fixture
@@ -103,30 +103,28 @@ def partitioned_df():
 
 
 def test_select(df):
-    df = df.select(
+    df_1 = df.select(
         column("a") + column("b"),
         column("a") - column("b"),
     )
 
     # execute and collect the first (and only) batch
-    result = df.collect()[0]
+    result = df_1.collect()[0]
 
     assert result.column(0) == pa.array([5, 7, 9])
     assert result.column(1) == pa.array([-3, -3, -3])
 
-
-def test_select_mixed_expr_string(df):
-    df = df.select_columns(column("b"), "a")
+    df_2 = df.select("b", "a")
 
     # execute and collect the first (and only) batch
-    result = df.collect()[0]
+    result = df_2.collect()[0]
 
     assert result.column(0) == pa.array([4, 5, 6])
     assert result.column(1) == pa.array([1, 2, 3])
 
 
-def test_select_columns(df):
-    df = df.select_columns("b", "a")
+def test_select_mixed_expr_string(df):
+    df = df.select(column("b"), "a")
 
     # execute and collect the first (and only) batch
     result = df.collect()[0]
@@ -169,6 +167,17 @@ def test_sort(df):
     assert table.to_pydict() == expected
 
 
+def test_drop(df):
+    df = df.drop("c")
+
+    # execute and collect the first (and only) batch
+    result = df.collect()[0]
+
+    assert df.schema().names == ["a", "b"]
+    assert result.column(0) == pa.array([1, 2, 3])
+    assert result.column(1) == pa.array([4, 5, 6])
+
+
 def test_limit(df):
     df = df.limit(1)
 
@@ -190,6 +199,28 @@ def test_limit_with_offset(df):
     assert len(result.column(1)) == 1
 
 
+def test_head(df):
+    df = df.head(1)
+
+    # execute and collect the first (and only) batch
+    result = df.collect()[0]
+
+    assert result.column(0) == pa.array([1])
+    assert result.column(1) == pa.array([4])
+    assert result.column(2) == pa.array([8])
+
+
+def test_tail(df):
+    df = df.tail(1)
+
+    # execute and collect the first (and only) batch
+    result = df.collect()[0]
+
+    assert result.column(0) == pa.array([3])
+    assert result.column(1) == pa.array([6])
+    assert result.column(2) == pa.array([8])
+
+
 def test_with_column(df):
     df = df.with_column("c", column("a") + column("b"))
 
@@ -203,6 +234,46 @@ def test_with_column(df):
     assert result.column(0) == pa.array([1, 2, 3])
     assert result.column(1) == pa.array([4, 5, 6])
     assert result.column(2) == pa.array([5, 7, 9])
+
+
+def test_with_columns(df):
+    df = df.with_columns(
+        (column("a") + column("b")).alias("c"),
+        (column("a") + column("b")).alias("d"),
+        [
+            (column("a") + column("b")).alias("e"),
+            (column("a") + column("b")).alias("f"),
+        ],
+        g=(column("a") + column("b")),
+    )
+
+    # execute and collect the first (and only) batch
+    result = df.collect()[0]
+
+    assert result.schema.field(0).name == "a"
+    assert result.schema.field(1).name == "b"
+    assert result.schema.field(2).name == "c"
+    assert result.schema.field(3).name == "d"
+    assert result.schema.field(4).name == "e"
+    assert result.schema.field(5).name == "f"
+    assert result.schema.field(6).name == "g"
+
+    assert result.column(0) == pa.array([1, 2, 3])
+    assert result.column(1) == pa.array([4, 5, 6])
+    assert result.column(2) == pa.array([5, 7, 9])
+    assert result.column(3) == pa.array([5, 7, 9])
+    assert result.column(4) == pa.array([5, 7, 9])
+    assert result.column(5) == pa.array([5, 7, 9])
+    assert result.column(6) == pa.array([5, 7, 9])
+
+
+def test_cast(df):
+    df = df.cast({"a": pa.float16(), "b": pa.list_(pa.uint32())})
+    expected = pa.schema(
+        [("a", pa.float16()), ("b", pa.list_(pa.uint32())), ("c", pa.int64())]
+    )
+
+    assert df.schema() == expected
 
 
 def test_with_column_renamed(df):
@@ -235,21 +306,7 @@ def test_unnest_without_nulls(nested_df):
     assert result.column(1) == pa.array([7, 8, 8, 9, 9, 9])
 
 
-def test_udf(df):
-    # is_null is a pa function over arrays
-    is_null = udf(
-        lambda x: x.is_null(),
-        [pa.int64()],
-        pa.bool_(),
-        volatility="immutable",
-    )
-
-    df = df.select(is_null(column("a")))
-    result = df.collect()[0].column(0)
-
-    assert result == pa.array([False, False, False])
-
-
+@pytest.mark.filterwarnings("ignore:`join_keys`:DeprecationWarning")
 def test_join():
     ctx = SessionContext()
 
@@ -265,12 +322,106 @@ def test_join():
     )
     df1 = ctx.create_dataframe([[batch]], "r")
 
-    df = df.join(df1, join_keys=(["a"], ["a"]), how="inner")
-    df.show()
-    df = df.sort(column("l.a"))
-    table = pa.Table.from_batches(df.collect())
+    df2 = df.join(df1, on="a", how="inner")
+    df2.show()
+    df2 = df2.sort(column("l.a"))
+    table = pa.Table.from_batches(df2.collect())
 
     expected = {"a": [1, 2], "c": [8, 10], "b": [4, 5]}
+    assert table.to_pydict() == expected
+
+    df2 = df.join(df1, left_on="a", right_on="a", how="inner")
+    df2.show()
+    df2 = df2.sort(column("l.a"))
+    table = pa.Table.from_batches(df2.collect())
+
+    expected = {"a": [1, 2], "c": [8, 10], "b": [4, 5]}
+    assert table.to_pydict() == expected
+
+    # Verify we don't make a breaking change to pre-43.0.0
+    # where users would pass join_keys as a positional argument
+    df2 = df.join(df1, (["a"], ["a"]), how="inner")  # type: ignore
+    df2.show()
+    df2 = df2.sort(column("l.a"))
+    table = pa.Table.from_batches(df2.collect())
+
+    expected = {"a": [1, 2], "c": [8, 10], "b": [4, 5]}
+    assert table.to_pydict() == expected
+
+
+def test_join_invalid_params():
+    ctx = SessionContext()
+
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2, 3]), pa.array([4, 5, 6])],
+        names=["a", "b"],
+    )
+    df = ctx.create_dataframe([[batch]], "l")
+
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2]), pa.array([8, 10])],
+        names=["a", "c"],
+    )
+    df1 = ctx.create_dataframe([[batch]], "r")
+
+    with pytest.deprecated_call():
+        df2 = df.join(df1, join_keys=(["a"], ["a"]), how="inner")
+        df2.show()
+        df2 = df2.sort(column("l.a"))
+        table = pa.Table.from_batches(df2.collect())
+
+        expected = {"a": [1, 2], "c": [8, 10], "b": [4, 5]}
+        assert table.to_pydict() == expected
+
+    with pytest.raises(
+        ValueError, match=r"`left_on` or `right_on` should not provided with `on`"
+    ):
+        df2 = df.join(df1, on="a", how="inner", right_on="test")  # type: ignore
+
+    with pytest.raises(
+        ValueError, match=r"`left_on` and `right_on` should both be provided."
+    ):
+        df2 = df.join(df1, left_on="a", how="inner")  # type: ignore
+
+    with pytest.raises(
+        ValueError, match=r"either `on` or `left_on` and `right_on` should be provided."
+    ):
+        df2 = df.join(df1, how="inner")  # type: ignore
+
+
+def test_join_on():
+    ctx = SessionContext()
+
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2, 3]), pa.array([4, 5, 6])],
+        names=["a", "b"],
+    )
+    df = ctx.create_dataframe([[batch]], "l")
+
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2]), pa.array([-8, 10])],
+        names=["a", "c"],
+    )
+    df1 = ctx.create_dataframe([[batch]], "r")
+
+    df2 = df.join_on(df1, column("l.a").__eq__(column("r.a")), how="inner")
+    df2.show()
+    df2 = df2.sort(column("l.a"))
+    table = pa.Table.from_batches(df2.collect())
+
+    expected = {"a": [1, 2], "c": [-8, 10], "b": [4, 5]}
+    assert table.to_pydict() == expected
+
+    df3 = df.join_on(
+        df1,
+        column("l.a").__eq__(column("r.a")),
+        column("l.a").__lt__(column("r.c")),
+        how="inner",
+    )
+    df3.show()
+    df3 = df3.sort(column("l.a"))
+    table = pa.Table.from_batches(df3.collect())
+    expected = {"a": [2], "c": [10], "b": [5]}
     assert table.to_pydict() == expected
 
 
@@ -386,38 +537,32 @@ data_test_window_functions = [
         ),
         [-1, -1, None, 7, -1, -1, None],
     ),
-    # TODO update all aggregate functions as windows once upstream merges https://github.com/apache/datafusion-python/issues/833
-    pytest.param(
+    (
         "first_value",
-        f.window(
-            "first_value",
-            [column("a")],
-            order_by=[f.order_by(column("b"))],
-            partition_by=[column("c")],
+        f.first_value(column("a")).over(
+            Window(partition_by=[column("c")], order_by=[column("b")])
         ),
         [1, 1, 1, 1, 5, 5, 5],
     ),
-    pytest.param(
+    (
         "last_value",
-        f.window("last_value", [column("a")])
-        .window_frame(WindowFrame("rows", 0, None))
-        .order_by(column("b"))
-        .partition_by(column("c"))
-        .build(),
+        f.last_value(column("a")).over(
+            Window(
+                partition_by=[column("c")],
+                order_by=[column("b")],
+                window_frame=WindowFrame("rows", None, None),
+            )
+        ),
         [3, 3, 3, 3, 6, 6, 6],
     ),
-    pytest.param(
+    (
         "3rd_value",
-        f.window(
-            "nth_value",
-            [column("b"), literal(3)],
-            order_by=[f.order_by(column("a"))],
-        ),
+        f.nth_value(column("b"), 3).over(Window(order_by=[column("a")])),
         [None, None, 7, 7, 7, 7, 7],
     ),
-    pytest.param(
+    (
         "avg",
-        f.round(f.window("avg", [column("b")], order_by=[column("a")]), literal(3)),
+        f.round(f.avg(column("b")).over(Window(order_by=[column("a")])), literal(3)),
         [7.0, 7.0, 7.0, 7.333, 7.75, 7.75, 8.0],
     ),
 ]
@@ -471,6 +616,44 @@ def test_valid_window_frame(units, start_bound, end_bound):
 def test_invalid_window_frame(units, start_bound, end_bound):
     with pytest.raises(RuntimeError):
         WindowFrame(units, start_bound, end_bound)
+
+
+def test_window_frame_defaults_match_postgres(partitioned_df):
+    # ref: https://github.com/apache/datafusion-python/issues/688
+
+    window_frame = WindowFrame("rows", None, None)
+
+    col_a = column("a")
+
+    # Using `f.window` with or without an unbounded window_frame produces the same
+    # results. These tests are included as a regression check but can be removed when
+    # f.window() is deprecated in favor of using the .over() approach.
+    no_frame = f.window("avg", [col_a]).alias("no_frame")
+    with_frame = f.window("avg", [col_a], window_frame=window_frame).alias("with_frame")
+    df_1 = partitioned_df.select(col_a, no_frame, with_frame)
+
+    expected = {
+        "a": [0, 1, 2, 3, 4, 5, 6],
+        "no_frame": [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+        "with_frame": [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+    }
+
+    assert df_1.sort(col_a).to_pydict() == expected
+
+    # When order is not set, the default frame should be unounded preceeding to
+    # unbounded following. When order is set, the default frame is unbounded preceeding
+    # to current row.
+    no_order = f.avg(col_a).over(Window()).alias("over_no_order")
+    with_order = f.avg(col_a).over(Window(order_by=[col_a])).alias("over_with_order")
+    df_2 = partitioned_df.select(col_a, no_order, with_order)
+
+    expected = {
+        "a": [0, 1, 2, 3, 4, 5, 6],
+        "over_no_order": [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+        "over_with_order": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+    }
+
+    assert df_2.sort(col_a).to_pydict() == expected
 
 
 def test_get_dataframe(tmp_path):
@@ -578,8 +761,8 @@ def test_execution_plan(aggregate_df):
     batch = stream.next()
     assert batch is not None
     # there should be no more batches
-    batch = stream.next()
-    assert batch is None
+    with pytest.raises(StopIteration):
+        stream.next()
 
 
 def test_repartition(df):
@@ -924,12 +1107,24 @@ def test_write_compressed_parquet_wrong_compression_level(
         )
 
 
-@pytest.mark.parametrize("compression", ["brotli", "zstd", "wrong"])
-def test_write_compressed_parquet_missing_compression_level(df, tmp_path, compression):
+@pytest.mark.parametrize("compression", ["wrong"])
+def test_write_compressed_parquet_invalid_compression(df, tmp_path, compression):
     path = tmp_path
 
     with pytest.raises(ValueError):
         df.write_parquet(str(path), compression=compression)
+
+
+# not testing lzo because it it not implemented yet
+# https://github.com/apache/arrow-rs/issues/6970
+@pytest.mark.parametrize("compression", ["zstd", "brotli", "gzip"])
+def test_write_compressed_parquet_default_compression_level(df, tmp_path, compression):
+    # Test write_parquet with zstd, brotli, gzip default compression level,
+    # ie don't specify compression level
+    # should complete without error
+    path = tmp_path
+
+    df.write_parquet(str(path), compression=compression)
 
 
 def test_dataframe_export(df) -> None:

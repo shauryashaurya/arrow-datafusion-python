@@ -21,10 +21,10 @@ use pyo3::prelude::*;
 
 // Re-export Apache Arrow DataFusion dependencies
 pub use datafusion;
-pub use datafusion_common;
-pub use datafusion_expr;
-pub use datafusion_optimizer;
-pub use datafusion_sql;
+pub use datafusion::common as datafusion_common;
+pub use datafusion::logical_expr as datafusion_expr;
+pub use datafusion::optimizer;
+pub use datafusion::sql as datafusion_sql;
 
 #[cfg(feature = "substrait")]
 pub use datafusion_substrait;
@@ -32,6 +32,7 @@ pub use datafusion_substrait;
 #[allow(clippy::borrow_deref_ref)]
 pub mod catalog;
 pub mod common;
+
 #[allow(clippy::borrow_deref_ref)]
 mod config;
 #[allow(clippy::borrow_deref_ref)]
@@ -57,6 +58,7 @@ pub mod substrait;
 mod udaf;
 #[allow(clippy::borrow_deref_ref)]
 mod udf;
+mod udwf;
 pub mod utils;
 
 #[cfg(feature = "mimalloc")]
@@ -64,7 +66,6 @@ pub mod utils;
 static GLOBAL: MiMalloc = MiMalloc;
 
 // Used to define Tokio Runtime as a Python module attribute
-#[pyclass]
 pub(crate) struct TokioRuntime(tokio::runtime::Runtime);
 
 /// Low-level DataFusion internal package.
@@ -73,22 +74,18 @@ pub(crate) struct TokioRuntime(tokio::runtime::Runtime);
 /// datafusion directory.
 #[pymodule]
 fn _internal(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
-    // Register the Tokio Runtime as a module attribute so we can reuse it
-    m.add(
-        "runtime",
-        TokioRuntime(tokio::runtime::Runtime::new().unwrap()),
-    )?;
     // Register the python classes
     m.add_class::<catalog::PyCatalog>()?;
     m.add_class::<catalog::PyDatabase>()?;
     m.add_class::<catalog::PyTable>()?;
-    m.add_class::<context::PyRuntimeConfig>()?;
+    m.add_class::<context::PyRuntimeEnvBuilder>()?;
     m.add_class::<context::PySessionConfig>()?;
     m.add_class::<context::PySessionContext>()?;
     m.add_class::<context::PySQLOptions>()?;
     m.add_class::<dataframe::PyDataFrame>()?;
     m.add_class::<udf::PyScalarUDF>()?;
     m.add_class::<udaf::PyAggregateUDF>()?;
+    m.add_class::<udwf::PyWindowUDF>()?;
     m.add_class::<config::PyConfig>()?;
     m.add_class::<sql::logical::PyLogicalPlan>()?;
     m.add_class::<physical_plan::PyExecutionPlan>()?;

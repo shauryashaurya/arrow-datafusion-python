@@ -38,12 +38,10 @@ WORD_2 = "requests"
 
 ctx = SessionContext()
 
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_custkey", "o_comment"
 )
-df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select_columns(
-    "c_custkey"
-)
+df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select("c_custkey")
 
 # Use a regex to remove special cases
 df_orders = df_orders.filter(
@@ -51,7 +49,9 @@ df_orders = df_orders.filter(
 )
 
 # Since we may have customers with no orders we must do a left join
-df = df_customer.join(df_orders, (["c_custkey"], ["o_custkey"]), how="left")
+df = df_customer.join(
+    df_orders, left_on=["c_custkey"], right_on=["o_custkey"], how="left"
+)
 
 # Find the number of orders for each customer
 df = df.aggregate([col("c_custkey")], [F.count(col("o_custkey")).alias("c_count")])

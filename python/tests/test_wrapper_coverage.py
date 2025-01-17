@@ -20,15 +20,29 @@ import datafusion.functions
 import datafusion.object_store
 import datafusion.substrait
 
+# EnumType introduced in 3.11. 3.10 and prior it was called EnumMeta.
+try:
+    from enum import EnumType
+except ImportError:
+    from enum import EnumMeta as EnumType
+
 
 def missing_exports(internal_obj, wrapped_obj) -> None:
+    # Special case enums - just make sure they exist since dir()
+    # and other functions get overridden.
+    if isinstance(wrapped_obj, EnumType):
+        return
+
     for attr in dir(internal_obj):
         assert attr in dir(wrapped_obj)
 
         internal_attr = getattr(internal_obj, attr)
         wrapped_attr = getattr(wrapped_obj, attr)
 
-        assert wrapped_attr is not None if internal_attr is not None else True
+        if internal_attr is not None:
+            if wrapped_attr is None:
+                print("Missing attribute: ", attr)
+                assert False
 
         if attr in ["__self__", "__class__"]:
             continue
@@ -41,7 +55,7 @@ def missing_exports(internal_obj, wrapped_obj) -> None:
 
 
 def test_datafusion_missing_exports() -> None:
-    """Check for any missing pythone exports.
+    """Check for any missing python exports.
 
     This test verifies that every exposed class, attribute, and function in
     the internal (pyo3) module is also exposed in our python wrappers.

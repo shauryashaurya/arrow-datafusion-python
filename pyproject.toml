@@ -23,10 +23,10 @@ build-backend = "maturin"
 name = "datafusion"
 description = "Build and run queries against data"
 readme = "README.md"
-license = {file = "LICENSE.txt"}
-requires-python = ">=3.6"
+license = { file = "LICENSE.txt" }
+requires-python = ">=3.7"
 keywords = ["datafusion", "dataframe", "rust", "query-engine"]
-classifier = [
+classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
@@ -39,13 +39,14 @@ classifier = [
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python",
     "Programming Language :: Rust",
 ]
-dependencies = [
-    "pyarrow>=11.0.0",
-    "typing-extensions;python_version<'3.13'",
-]
+dependencies = ["pyarrow>=11.0.0", "typing-extensions;python_version<'3.13'"]
+dynamic = ["version"]
 
 [project.urls]
 homepage = "https://datafusion.apache.org/python"
@@ -58,9 +59,7 @@ profile = "black"
 [tool.maturin]
 python-source = "python"
 module-name = "datafusion._internal"
-include = [
-    { path = "Cargo.lock", format = "sdist" }
-]
+include = [{ path = "Cargo.lock", format = "sdist" }]
 exclude = [".github/**", "ci/**", ".asf.yaml"]
 # Require Cargo.lock is up to date
 locked = true
@@ -78,7 +77,7 @@ max-doc-length = 88
 
 # Disable docstring checking for these directories
 [tool.ruff.lint.per-file-ignores]
-"python/datafusion/tests/*" = ["D"]
+"python/tests/*" = ["D"]
 "examples/*" = ["D", "W505"]
 "dev/*" = ["D"]
 "benchmarks/*" = ["D", "F"]

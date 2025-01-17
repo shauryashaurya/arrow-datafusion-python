@@ -31,15 +31,15 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_expr::Expr;
 
 use crate::dataset_exec::DatasetExec;
 use crate::pyarrow_filter_expression::PyArrowFilterExpression;
 
 // Wraps a pyarrow.dataset.Dataset class and implements a Datafusion TableProvider around it
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Dataset {
     dataset: PyObject,
 }

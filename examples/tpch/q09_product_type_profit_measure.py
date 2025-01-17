@@ -39,16 +39,14 @@ part_color = lit("green")
 
 ctx = SessionContext()
 
-df_part = ctx.read_parquet(get_data_path("part.parquet")).select_columns(
-    "p_partkey", "p_name"
-)
-df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select_columns(
+df_part = ctx.read_parquet(get_data_path("part.parquet")).select("p_partkey", "p_name")
+df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select(
     "s_suppkey", "s_nationkey"
 )
-df_partsupp = ctx.read_parquet(get_data_path("partsupp.parquet")).select_columns(
+df_partsupp = ctx.read_parquet(get_data_path("partsupp.parquet")).select(
     "ps_suppkey", "ps_partkey", "ps_supplycost"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_partkey",
     "l_extendedprice",
     "l_discount",
@@ -56,10 +54,10 @@ df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns
     "l_orderkey",
     "l_quantity",
 )
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_orderkey", "o_custkey", "o_orderdate"
 )
-df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
+df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select(
     "n_nationkey", "n_name", "n_regionkey"
 )
 
@@ -67,13 +65,16 @@ df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
 df = df_part.filter(F.strpos(col("p_name"), part_color) > lit(0))
 
 # We have a series of joins that get us to limit down to the line items we need
-df = df.join(df_lineitem, (["p_partkey"], ["l_partkey"]), how="inner")
-df = df.join(df_supplier, (["l_suppkey"], ["s_suppkey"]), how="inner")
-df = df.join(df_orders, (["l_orderkey"], ["o_orderkey"]), how="inner")
+df = df.join(df_lineitem, left_on=["p_partkey"], right_on=["l_partkey"], how="inner")
+df = df.join(df_supplier, left_on=["l_suppkey"], right_on=["s_suppkey"], how="inner")
+df = df.join(df_orders, left_on=["l_orderkey"], right_on=["o_orderkey"], how="inner")
 df = df.join(
-    df_partsupp, (["l_suppkey", "l_partkey"], ["ps_suppkey", "ps_partkey"]), how="inner"
+    df_partsupp,
+    left_on=["l_suppkey", "l_partkey"],
+    right_on=["ps_suppkey", "ps_partkey"],
+    how="inner",
 )
-df = df.join(df_nation, (["s_nationkey"], ["n_nationkey"]), how="inner")
+df = df.join(df_nation, left_on=["s_nationkey"], right_on=["n_nationkey"], how="inner")
 
 # Compute the intermediate values and limit down to the expressions we need
 df = df.select(

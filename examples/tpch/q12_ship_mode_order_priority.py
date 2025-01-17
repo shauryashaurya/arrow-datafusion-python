@@ -42,10 +42,10 @@ DATE_OF_INTEREST = "1994-01-01"
 
 ctx = SessionContext()
 
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_orderkey", "o_orderpriority"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_orderkey", "l_shipmode", "l_commitdate", "l_shipdate", "l_receiptdate"
 )
 
@@ -75,7 +75,7 @@ df = df.filter(
 
 
 # We need order priority, so join order df to line item
-df = df.join(df_orders, (["l_orderkey"], ["o_orderkey"]), how="inner")
+df = df.join(df_orders, left_on=["l_orderkey"], right_on=["o_orderkey"], how="inner")
 
 # Restrict to line items we care about based on the problem statement.
 df = df.filter(col("l_commitdate") < col("l_receiptdate"))

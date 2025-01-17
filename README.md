@@ -87,7 +87,7 @@ It is possible to configure runtime (memory and disk settings) and configuration
 
 ```python
 runtime = (
-    RuntimeConfig()
+    RuntimeEnvBuilder()
     .with_disk_manager_os()
     .with_fair_spill_pool(10000000)
 )
@@ -178,6 +178,8 @@ conda env create -f ./conda/environments/datafusion-dev.yaml -n datafusion-dev
 # activate the conda environment
 conda activate datafusion-dev
 ```
+
+Or alternatively, if you are on an OS that supports CUDA Toolkit, you can use `-f ./conda/environments/datafusion-cuda-dev.yaml`.
 
 Bootstrap (Pip):
 

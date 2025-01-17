@@ -35,16 +35,16 @@ NATION_OF_INTEREST = "SAUDI ARABIA"
 
 ctx = SessionContext()
 
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_orderkey", "o_orderstatus"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_orderkey", "l_receiptdate", "l_commitdate", "l_suppkey"
 )
-df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select_columns(
+df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select(
     "s_suppkey", "s_name", "s_nationkey"
 )
-df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
+df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select(
     "n_nationkey", "n_name"
 )
 
@@ -52,13 +52,13 @@ df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
 df_suppliers_of_interest = df_nation.filter(col("n_name") == lit(NATION_OF_INTEREST))
 
 df_suppliers_of_interest = df_suppliers_of_interest.join(
-    df_supplier, (["n_nationkey"], ["s_nationkey"]), "inner"
+    df_supplier, left_on="n_nationkey", right_on="s_nationkey", how="inner"
 )
 
 # Find the failed orders and all their line items
 df = df_orders.filter(col("o_orderstatus") == lit("F"))
 
-df = df_lineitem.join(df, (["l_orderkey"], ["o_orderkey"]), "inner")
+df = df_lineitem.join(df, left_on="l_orderkey", right_on="o_orderkey", how="inner")
 
 # Identify the line items for which the order is failed due to.
 df = df.with_column(
@@ -102,7 +102,9 @@ df = df.select(
 )
 
 # Join to the supplier of interest list for the nation of interest
-df = df.join(df_suppliers_of_interest, (["suppkey"], ["s_suppkey"]), "inner")
+df = df.join(
+    df_suppliers_of_interest, left_on=["suppkey"], right_on=["s_suppkey"], how="inner"
+)
 
 # Count how many orders that supplier is the only failed supplier for
 df = df.aggregate([col("s_name")], [F.count(col("o_orderkey")).alias("numwait")])

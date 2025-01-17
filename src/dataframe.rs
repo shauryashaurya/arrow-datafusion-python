@@ -27,25 +27,28 @@ use arrow::util::display::{ArrayFormatter, FormatOptions};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::pyarrow::{PyArrowType, ToPyArrow};
 use datafusion::arrow::util::pretty;
+use datafusion::common::UnnestOptions;
 use datafusion::config::{CsvOptions, TableParquetOptions};
 use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
 use datafusion::prelude::*;
-use datafusion_common::UnnestOptions;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use pyo3::types::{PyCapsule, PyTuple};
+use pyo3::types::{PyCapsule, PyTuple, PyTupleMethods};
 use tokio::task::JoinHandle;
 
 use crate::errors::py_datafusion_err;
-use crate::expr::to_sort_expressions;
+use crate::expr::sort_expr::to_sort_expressions;
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
 use crate::sql::logical::PyLogicalPlan;
-use crate::utils::{get_tokio_runtime, wait_for_future};
-use crate::{errors::DataFusionError, expr::PyExpr};
+use crate::utils::{get_tokio_runtime, validate_pycapsule, wait_for_future};
+use crate::{
+    errors::DataFusionError,
+    expr::{sort_expr::PySortExpr, PyExpr},
+};
 
 /// A PyDataFrame is a representation of a logical plan and an API to compose statements.
 /// Use it to build a plan and `.collect()` to execute the plan and collect the result.
@@ -70,7 +73,7 @@ impl PyDataFrame {
         if let Ok(key) = key.extract::<PyBackedStr>() {
             // df[col]
             self.select_columns(vec![key])
-        } else if let Ok(tuple) = key.extract::<&PyTuple>() {
+        } else if let Ok(tuple) = key.downcast::<PyTuple>() {
             // df[col1, col2, col3]
             let keys = tuple
                 .iter()
@@ -167,6 +170,13 @@ impl PyDataFrame {
         Ok(Self::new(df))
     }
 
+    #[pyo3(signature = (*args))]
+    fn drop(&self, args: Vec<PyBackedStr>) -> PyResult<Self> {
+        let cols = args.iter().map(|s| s.as_ref()).collect::<Vec<&str>>();
+        let df = self.df.as_ref().clone().drop_columns(&cols)?;
+        Ok(Self::new(df))
+    }
+
     fn filter(&self, predicate: PyExpr) -> PyResult<Self> {
         let df = self.df.as_ref().clone().filter(predicate.into())?;
         Ok(Self::new(df))
@@ -174,6 +184,16 @@ impl PyDataFrame {
 
     fn with_column(&self, name: &str, expr: PyExpr) -> PyResult<Self> {
         let df = self.df.as_ref().clone().with_column(name, expr.into())?;
+        Ok(Self::new(df))
+    }
+
+    fn with_columns(&self, exprs: Vec<PyExpr>) -> PyResult<Self> {
+        let mut df = self.df.as_ref().clone();
+        for expr in exprs {
+            let expr: Expr = expr.into();
+            let name = format!("{}", expr.schema_name());
+            df = df.with_column(name.as_str(), expr)?
+        }
         Ok(Self::new(df))
     }
 
@@ -196,7 +216,7 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (*exprs))]
-    fn sort(&self, exprs: Vec<PyExpr>) -> PyResult<Self> {
+    fn sort(&self, exprs: Vec<PySortExpr>) -> PyResult<Self> {
         let exprs = to_sort_expressions(exprs);
         let df = self.df.as_ref().clone().sort(exprs)?;
         Ok(Self::new(df))
@@ -251,8 +271,9 @@ impl PyDataFrame {
     fn join(
         &self,
         right: PyDataFrame,
-        join_keys: (Vec<PyBackedStr>, Vec<PyBackedStr>),
         how: &str,
+        left_on: Vec<PyBackedStr>,
+        right_on: Vec<PyBackedStr>,
     ) -> PyResult<Self> {
         let join_type = match how {
             "inner" => JoinType::Inner,
@@ -269,16 +290,8 @@ impl PyDataFrame {
             }
         };
 
-        let left_keys = join_keys
-            .0
-            .iter()
-            .map(|s| s.as_ref())
-            .collect::<Vec<&str>>();
-        let right_keys = join_keys
-            .1
-            .iter()
-            .map(|s| s.as_ref())
-            .collect::<Vec<&str>>();
+        let left_keys = left_on.iter().map(|s| s.as_ref()).collect::<Vec<&str>>();
+        let right_keys = right_on.iter().map(|s| s.as_ref()).collect::<Vec<&str>>();
 
         let df = self.df.as_ref().clone().join(
             right.df.as_ref().clone(),
@@ -287,6 +300,31 @@ impl PyDataFrame {
             &right_keys,
             None,
         )?;
+        Ok(Self::new(df))
+    }
+
+    fn join_on(&self, right: PyDataFrame, on_exprs: Vec<PyExpr>, how: &str) -> PyResult<Self> {
+        let join_type = match how {
+            "inner" => JoinType::Inner,
+            "left" => JoinType::Left,
+            "right" => JoinType::Right,
+            "full" => JoinType::Full,
+            "semi" => JoinType::LeftSemi,
+            "anti" => JoinType::LeftAnti,
+            how => {
+                return Err(DataFusionError::Common(format!(
+                    "The join type {how} does not exist or is not implemented"
+                ))
+                .into());
+            }
+        };
+        let exprs: Vec<Expr> = on_exprs.into_iter().map(|e| e.into()).collect();
+
+        let df = self
+            .df
+            .as_ref()
+            .clone()
+            .join_on(right.df.as_ref().clone(), join_type, exprs)?;
         Ok(Self::new(df))
     }
 
@@ -364,7 +402,9 @@ impl PyDataFrame {
 
     #[pyo3(signature = (column, preserve_nulls=true))]
     fn unnest_column(&self, column: &str, preserve_nulls: bool) -> PyResult<Self> {
-        let unnest_options = UnnestOptions { preserve_nulls };
+        // TODO: expose RecursionUnnestOptions
+        // REF: https://github.com/apache/datafusion/pull/11577
+        let unnest_options = UnnestOptions::default().with_preserve_nulls(preserve_nulls);
         let df = self
             .df
             .as_ref()
@@ -375,7 +415,9 @@ impl PyDataFrame {
 
     #[pyo3(signature = (columns, preserve_nulls=true))]
     fn unnest_columns(&self, columns: Vec<String>, preserve_nulls: bool) -> PyResult<Self> {
-        let unnest_options = UnnestOptions { preserve_nulls };
+        // TODO: expose RecursionUnnestOptions
+        // REF: https://github.com/apache/datafusion/pull/11577
+        let unnest_options = UnnestOptions::default().with_preserve_nulls(preserve_nulls);
         let cols = columns.iter().map(|s| s.as_ref()).collect::<Vec<&str>>();
         let df = self
             .df
@@ -421,7 +463,7 @@ impl PyDataFrame {
     /// Write a `DataFrame` to a Parquet file.
     #[pyo3(signature = (
         path,
-        compression="uncompressed",
+        compression="zstd",
         compression_level=None
         ))]
     fn write_parquet(
@@ -449,7 +491,7 @@ impl PyDataFrame {
                 ZstdLevel::try_new(verify_compression_level(compression_level)? as i32)
                     .map_err(|e| PyValueError::new_err(format!("{e}")))?,
             ),
-            "lz0" => Compression::LZO,
+            "lzo" => Compression::LZO,
             "lz4" => Compression::LZ4,
             "lz4_raw" => Compression::LZ4_RAW,
             "uncompressed" => Compression::UNCOMPRESSED,
@@ -504,6 +546,7 @@ impl PyDataFrame {
         Ok(table)
     }
 
+    #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_stream__<'py>(
         &'py mut self,
         py: Python<'py>,
@@ -539,9 +582,9 @@ impl PyDataFrame {
 
     fn execute_stream(&self, py: Python) -> PyResult<PyRecordBatchStream> {
         // create a Tokio runtime to run the async code
-        let rt = &get_tokio_runtime(py).0;
+        let rt = &get_tokio_runtime().0;
         let df = self.df.as_ref().clone();
-        let fut: JoinHandle<datafusion_common::Result<SendableRecordBatchStream>> =
+        let fut: JoinHandle<datafusion::common::Result<SendableRecordBatchStream>> =
             rt.spawn(async move { df.execute_stream().await });
         let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
         Ok(PyRecordBatchStream::new(stream?))
@@ -549,9 +592,9 @@ impl PyDataFrame {
 
     fn execute_stream_partitioned(&self, py: Python) -> PyResult<Vec<PyRecordBatchStream>> {
         // create a Tokio runtime to run the async code
-        let rt = &get_tokio_runtime(py).0;
+        let rt = &get_tokio_runtime().0;
         let df = self.df.as_ref().clone();
-        let fut: JoinHandle<datafusion_common::Result<Vec<SendableRecordBatchStream>>> =
+        let fut: JoinHandle<datafusion::common::Result<Vec<SendableRecordBatchStream>>> =
             rt.spawn(async move { df.execute_stream_partitioned().await });
         let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
 
@@ -680,23 +723,4 @@ fn record_batch_into_schema(
     }
 
     RecordBatch::try_new(schema, data_arrays)
-}
-
-fn validate_pycapsule(capsule: &Bound<PyCapsule>, name: &str) -> PyResult<()> {
-    let capsule_name = capsule.name()?;
-    if capsule_name.is_none() {
-        return Err(PyValueError::new_err(
-            "Expected schema PyCapsule to have name set.",
-        ));
-    }
-
-    let capsule_name = capsule_name.unwrap().to_str()?;
-    if capsule_name != name {
-        return Err(PyValueError::new_err(format!(
-            "Expected name '{}' in PyCapsule, instead got '{}'",
-            name, capsule_name
-        )));
-    }
-
-    Ok(())
 }

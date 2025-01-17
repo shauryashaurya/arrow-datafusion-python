@@ -35,12 +35,10 @@ NATION_CODES = [13, 31, 23, 29, 30, 18, 17]
 
 ctx = SessionContext()
 
-df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select_columns(
+df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select(
     "c_phone", "c_acctbal", "c_custkey"
 )
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
-    "o_custkey"
-)
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select("o_custkey")
 
 # The nation code is a two digit number, but we need to convert it to a string literal
 nation_codes = F.make_array(*[lit(str(n)) for n in NATION_CODES])
@@ -64,7 +62,7 @@ df.show()
 df = df.filter(col("c_acctbal") > col("avg_balance"))
 
 # Limit results to customers with no orders
-df = df.join(df_orders, (["c_custkey"], ["o_custkey"]), "anti")
+df = df.join(df_orders, left_on="c_custkey", right_on="o_custkey", how="anti")
 
 # Count up the customers and the balances
 df = df.aggregate(

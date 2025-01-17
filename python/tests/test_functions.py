@@ -23,7 +23,7 @@ from datetime import datetime
 
 from datafusion import SessionContext, column
 from datafusion import functions as f
-from datafusion import literal
+from datafusion import literal, string_literal
 
 np.seterr(invalid="ignore")
 
@@ -34,9 +34,9 @@ def df():
     # create a RecordBatch and a new DataFrame from it
     batch = pa.RecordBatch.from_arrays(
         [
-            pa.array(["Hello", "World", "!"]),
+            pa.array(["Hello", "World", "!"], type=pa.string_view()),
             pa.array([4, 5, 6]),
-            pa.array(["hello ", " world ", " !"]),
+            pa.array(["hello ", " world ", " !"], type=pa.string_view()),
             pa.array(
                 [
                     datetime(2022, 12, 31),
@@ -44,8 +44,9 @@ def df():
                     datetime(2020, 7, 2),
                 ]
             ),
+            pa.array([False, True, True]),
         ],
-        names=["a", "b", "c", "d"],
+        names=["a", "b", "c", "d", "e"],
     )
     return ctx.create_dataframe([[batch]])
 
@@ -63,15 +64,14 @@ def test_named_struct(df):
     )
 
     expected = """DataFrame()
-+-------+---+---------+------------------------------+
-| a     | b | c       | d                            |
-+-------+---+---------+------------------------------+
-| Hello | 4 | hello   | {a: Hello, b: 4, c: hello }  |
-| World | 5 |  world  | {a: World, b: 5, c:  world } |
-| !     | 6 |  !      | {a: !, b: 6, c:  !}          |
-+-------+---+---------+------------------------------+
++-------+---+---------+------------------------------+-------+
+| a     | b | c       | d                            | e     |
++-------+---+---------+------------------------------+-------+
+| Hello | 4 | hello   | {a: Hello, b: 4, c: hello }  | false |
+| World | 5 |  world  | {a: World, b: 5, c:  world } | true  |
+| !     | 6 |  !      | {a: !, b: 6, c:  !}          | true  |
++-------+---+---------+------------------------------+-------+
 """.strip()
-
     assert str(df) == expected
 
 
@@ -88,8 +88,8 @@ def test_literal(df):
     assert len(result) == 1
     result = result[0]
     assert result.column(0) == pa.array([1] * 3)
-    assert result.column(1) == pa.array(["1"] * 3)
-    assert result.column(2) == pa.array(["OK"] * 3)
+    assert result.column(1) == pa.array(["1"] * 3, type=pa.string_view())
+    assert result.column(2) == pa.array(["OK"] * 3, type=pa.string_view())
     assert result.column(3) == pa.array([3.14] * 3)
     assert result.column(4) == pa.array([True] * 3)
     assert result.column(5) == pa.array([b"hello world"] * 3)
@@ -97,12 +97,17 @@ def test_literal(df):
 
 def test_lit_arith(df):
     """Test literals with arithmetic operations"""
-    df = df.select(literal(1) + column("b"), f.concat(column("a"), literal("!")))
+    df = df.select(
+        literal(1) + column("b"), f.concat(column("a").cast(pa.string()), literal("!"))
+    )
     result = df.collect()
     assert len(result) == 1
     result = result[0]
+
     assert result.column(0) == pa.array([5, 6, 7])
-    assert result.column(1) == pa.array(["Hello!", "World!", "!!"])
+    assert result.column(1) == pa.array(
+        ["Hello!", "World!", "!!"], type=pa.string_view()
+    )
 
 
 def test_math_functions():
@@ -290,6 +295,14 @@ def py_flatten(arr):
             lambda data: [np.concatenate([arr, arr]) for arr in data],
         ],
         [
+            lambda col: f.list_cat(col, col),
+            lambda data: [np.concatenate([arr, arr]) for arr in data],
+        ],
+        [
+            lambda col: f.list_concat(col, col),
+            lambda data: [np.concatenate([arr, arr]) for arr in data],
+        ],
+        [
             lambda col: f.array_dims(col),
             lambda data: [[len(r)] for r in data],
         ],
@@ -308,6 +321,14 @@ def py_flatten(arr):
         [
             lambda col: f.array_element(col, literal(1)),
             lambda data: [r[0] for r in data],
+        ],
+        [
+            lambda col: f.array_empty(col),
+            lambda data: [len(r) == 0 for r in data],
+        ],
+        [
+            lambda col: f.empty(col),
+            lambda data: [len(r) == 0 for r in data],
         ],
         [
             lambda col: f.array_extract(col, literal(1)),
@@ -430,6 +451,10 @@ def py_flatten(arr):
             lambda data: [[arr] * 2 for arr in data],
         ],
         [
+            lambda col: f.list_repeat(col, literal(2)),
+            lambda data: [[arr] * 2 for arr in data],
+        ],
+        [
             lambda col: f.array_replace(col, literal(3.0), literal(4.0)),
             lambda data: [py_arr_replace(arr, 3.0, 4.0, 1) for arr in data],
         ],
@@ -536,6 +561,55 @@ def test_array_function_flatten():
         )
 
 
+def test_array_function_cardinality():
+    data = [[1, 2, 3], [4, 4, 5, 6]]
+    ctx = SessionContext()
+    batch = pa.RecordBatch.from_arrays([np.array(data, dtype=object)], names=["arr"])
+    df = ctx.create_dataframe([[batch]])
+
+    stmt = f.cardinality(column("arr"))
+    py_expr = [len(arr) for arr in data]  # Expected lengths: [3, 3]
+    # assert py_expr lengths
+
+    query_result = df.select(stmt).collect()[0].column(0)
+
+    for a, b in zip(query_result, py_expr):
+        np.testing.assert_array_equal(
+            np.array([a.as_py()], dtype=int), np.array([b], dtype=int)
+        )
+
+
+@pytest.mark.parametrize("make_func", [f.make_array, f.make_list])
+def test_make_array_functions(make_func):
+    ctx = SessionContext()
+    batch = pa.RecordBatch.from_arrays(
+        [
+            pa.array(["Hello", "World", "!"], type=pa.string()),
+            pa.array([4, 5, 6]),
+            pa.array(["hello ", " world ", " !"], type=pa.string()),
+        ],
+        names=["a", "b", "c"],
+    )
+    df = ctx.create_dataframe([[batch]])
+
+    stmt = make_func(
+        column("a").cast(pa.string()),
+        column("b").cast(pa.string()),
+        column("c").cast(pa.string()),
+    )
+    py_expr = [
+        ["Hello", "4", "hello "],
+        ["World", "5", " world "],
+        ["!", "6", " !"],
+    ]
+
+    query_result = df.select(stmt).collect()[0].column(0)
+    for a, b in zip(query_result, py_expr):
+        np.testing.assert_array_equal(
+            np.array(a.as_py(), dtype=str), np.array(b, dtype=str)
+        )
+
+
 @pytest.mark.parametrize(
     ("stmt", "py_expr"),
     [
@@ -574,21 +648,36 @@ def test_array_function_obj_tests(stmt, py_expr):
             f.ascii(column("a")),
             pa.array([72, 87, 33], type=pa.int32()),
         ),  # H = 72; W = 87; ! = 33
-        (f.bit_length(column("a")), pa.array([40, 40, 8], type=pa.int32())),
-        (f.btrim(literal(" World ")), pa.array(["World", "World", "World"])),
+        (
+            f.bit_length(column("a").cast(pa.string())),
+            pa.array([40, 40, 8], type=pa.int32()),
+        ),
+        (
+            f.btrim(literal(" World ")),
+            pa.array(["World", "World", "World"], type=pa.string_view()),
+        ),
         (f.character_length(column("a")), pa.array([5, 5, 1], type=pa.int32())),
         (f.chr(literal(68)), pa.array(["D", "D", "D"])),
         (
             f.concat_ws("-", column("a"), literal("test")),
             pa.array(["Hello-test", "World-test", "!-test"]),
         ),
-        (f.concat(column("a"), literal("?")), pa.array(["Hello?", "World?", "!?"])),
-        (f.initcap(column("c")), pa.array(["Hello ", " World ", " !"])),
+        (
+            f.concat(column("a").cast(pa.string()), literal("?")),
+            pa.array(["Hello?", "World?", "!?"], type=pa.string_view()),
+        ),
+        (
+            f.initcap(column("c")),
+            pa.array(["Hello ", " World ", " !"], type=pa.string_view()),
+        ),
         (f.left(column("a"), literal(3)), pa.array(["Hel", "Wor", "!"])),
         (f.length(column("c")), pa.array([6, 7, 2], type=pa.int32())),
         (f.lower(column("a")), pa.array(["hello", "world", "!"])),
         (f.lpad(column("a"), literal(7)), pa.array(["  Hello", "  World", "      !"])),
-        (f.ltrim(column("c")), pa.array(["hello ", "world ", "!"])),
+        (
+            f.ltrim(column("c")),
+            pa.array(["hello ", "world ", "!"], type=pa.string_view()),
+        ),
         (
             f.md5(column("a")),
             pa.array(
@@ -614,19 +703,25 @@ def test_array_function_obj_tests(stmt, py_expr):
             f.rpad(column("a"), literal(8)),
             pa.array(["Hello   ", "World   ", "!       "]),
         ),
-        (f.rtrim(column("c")), pa.array(["hello", " world", " !"])),
+        (
+            f.rtrim(column("c")),
+            pa.array(["hello", " world", " !"], type=pa.string_view()),
+        ),
         (
             f.split_part(column("a"), literal("l"), literal(1)),
             pa.array(["He", "Wor", "!"]),
         ),
         (f.starts_with(column("a"), literal("Wor")), pa.array([False, True, False])),
         (f.strpos(column("a"), literal("o")), pa.array([5, 2, 0], type=pa.int32())),
-        (f.substr(column("a"), literal(3)), pa.array(["llo", "rld", ""])),
+        (
+            f.substr(column("a"), literal(3)),
+            pa.array(["llo", "rld", ""], type=pa.string_view()),
+        ),
         (
             f.translate(column("a"), literal("or"), literal("ld")),
             pa.array(["Helll", "Wldld", "!"]),
         ),
-        (f.trim(column("c")), pa.array(["hello", "world", "!"])),
+        (f.trim(column("c")), pa.array(["hello", "world", "!"], type=pa.string_view())),
         (f.upper(column("c")), pa.array(["HELLO ", " WORLD ", " !"])),
         (f.ends_with(column("a"), literal("llo")), pa.array([True, False, False])),
         (
@@ -695,9 +790,9 @@ def test_hash_functions(df):
     )
     assert result.column(2) == pa.array(
         [
-            b("185F8DB32271FE25F561A6FC938B2E26" "4306EC304EDA518007D1764826381969"),
-            b("78AE647DC5544D227130A0682A51E30B" "C7777FBB6D8A8F17007463A3ECD1D524"),
-            b("BB7208BC9B5D7C04F1236A82A0093A5E" "33F40423D5BA8D4266F7092C3BA43B62"),
+            b("185F8DB32271FE25F561A6FC938B2E264306EC304EDA518007D1764826381969"),
+            b("78AE647DC5544D227130A0682A51E30BC7777FBB6D8A8F17007463A3ECD1D524"),
+            b("BB7208BC9B5D7C04F1236A82A0093A5E33F40423D5BA8D4266F7092C3BA43B62"),
         ]
     )
     assert result.column(3) == pa.array(
@@ -743,16 +838,16 @@ def test_hash_functions(df):
     )
     assert result.column(5) == pa.array(
         [
-            b("F73A5FBF881F89B814871F46E26AD3FA" "37CB2921C5E8561618639015B3CCBB71"),
-            b("B792A0383FB9E7A189EC150686579532" "854E44B71AC394831DAED169BA85CCC5"),
-            b("27988A0E51812297C77A433F63523334" "6AEE29A829DCF4F46E0F58F402C6CFCB"),
+            b("F73A5FBF881F89B814871F46E26AD3FA37CB2921C5E8561618639015B3CCBB71"),
+            b("B792A0383FB9E7A189EC150686579532854E44B71AC394831DAED169BA85CCC5"),
+            b("27988A0E51812297C77A433F635233346AEE29A829DCF4F46E0F58F402C6CFCB"),
         ]
     )
     assert result.column(6) == pa.array(
         [
-            b("FBC2B0516EE8744D293B980779178A35" "08850FDCFE965985782C39601B65794F"),
-            b("BF73D18575A736E4037D45F9E316085B" "86C19BE6363DE6AA789E13DEAACC1C4E"),
-            b("C8D11B9F7237E4034ADBCD2005735F9B" "C4C597C75AD89F4492BEC8F77D15F7EB"),
+            b("FBC2B0516EE8744D293B980779178A3508850FDCFE965985782C39601B65794F"),
+            b("BF73D18575A736E4037D45F9E316085B86C19BE6363DE6AA789E13DEAACC1C4E"),
+            b("C8D11B9F7237E4034ADBCD2005735F9BC4C597C75AD89F4492BEC8F77D15F7EB"),
         ]
     )
     assert result.column(7) == result.column(1)  # SHA-224
@@ -768,21 +863,22 @@ def test_temporal_functions(df):
         f.date_trunc(literal("month"), column("d")),
         f.datetrunc(literal("day"), column("d")),
         f.date_bin(
-            literal("15 minutes"),
+            literal("15 minutes").cast(pa.string()),
             column("d"),
-            literal("2001-01-01 00:02:30"),
+            literal("2001-01-01 00:02:30").cast(pa.string()),
         ),
         f.from_unixtime(literal(1673383974)),
         f.to_timestamp(literal("2023-09-07 05:06:14.523952")),
         f.to_timestamp_seconds(literal("2023-09-07 05:06:14.523952")),
         f.to_timestamp_millis(literal("2023-09-07 05:06:14.523952")),
         f.to_timestamp_micros(literal("2023-09-07 05:06:14.523952")),
+        f.extract(literal("day"), column("d")),
     )
     result = df.collect()
     assert len(result) == 1
     result = result[0]
-    assert result.column(0) == pa.array([12, 6, 7], type=pa.float64())
-    assert result.column(1) == pa.array([2022, 2027, 2020], type=pa.float64())
+    assert result.column(0) == pa.array([12, 6, 7], type=pa.int32())
+    assert result.column(1) == pa.array([2022, 2027, 2020], type=pa.int32())
     assert result.column(2) == pa.array(
         [datetime(2022, 12, 1), datetime(2027, 6, 1), datetime(2020, 7, 1)],
         type=pa.timestamp("us"),
@@ -814,6 +910,23 @@ def test_temporal_functions(df):
     assert result.column(9) == pa.array(
         [datetime(2023, 9, 7, 5, 6, 14, 523952)] * 3, type=pa.timestamp("us")
     )
+    assert result.column(10) == pa.array([31, 26, 2], type=pa.int32())
+
+
+def test_arrow_cast(df):
+    df = df.select(
+        # we use `string_literal` to return utf8 instead of `literal` which returns
+        # utf8view because datafusion.arrow_cast expects a utf8 instead of utf8view
+        # https://github.com/apache/datafusion/blob/86740bfd3d9831d6b7c1d0e1bf4a21d91598a0ac/datafusion/functions/src/core/arrow_cast.rs#L179
+        f.arrow_cast(column("b"), string_literal("Float64")).alias("b_as_float"),
+        f.arrow_cast(column("b"), string_literal("Int32")).alias("b_as_int"),
+    )
+    result = df.collect()
+    assert len(result) == 1
+    result = result[0]
+
+    assert result.column(0) == pa.array([4.0, 5.0, 6.0], type=pa.float64())
+    assert result.column(1) == pa.array([4, 5, 6], type=pa.int32())
 
 
 def test_case(df):
@@ -832,8 +945,8 @@ def test_case(df):
     result = df.collect()
     result = result[0]
     assert result.column(0) == pa.array([10, 8, 8])
-    assert result.column(1) == pa.array(["Hola", "Mundo", "!!"])
-    assert result.column(2) == pa.array(["Hola", "Mundo", None])
+    assert result.column(1) == pa.array(["Hola", "Mundo", "!!"], type=pa.string_view())
+    assert result.column(2) == pa.array(["Hola", "Mundo", None], type=pa.string_view())
 
 
 def test_when_with_no_base(df):
@@ -851,8 +964,10 @@ def test_when_with_no_base(df):
     result = df.collect()
     result = result[0]
     assert result.column(0) == pa.array([4, 5, 6])
-    assert result.column(1) == pa.array(["too small", "just right", "too big"])
-    assert result.column(2) == pa.array(["Hello", None, None])
+    assert result.column(1) == pa.array(
+        ["too small", "just right", "too big"], type=pa.string_view()
+    )
+    assert result.column(2) == pa.array(["Hello", None, None], type=pa.string_view())
 
 
 def test_regr_funcs_sql(df):
@@ -912,17 +1027,64 @@ def test_regr_funcs_sql_2():
 @pytest.mark.parametrize(
     "func, expected",
     [
-        pytest.param(f.regr_slope, pa.array([2], type=pa.float64()), id="regr_slope"),
+        pytest.param(f.regr_slope(column("c2"), column("c1")), [4.6], id="regr_slope"),
         pytest.param(
-            f.regr_intercept, pa.array([0], type=pa.float64()), id="regr_intercept"
+            f.regr_slope(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [8],
+            id="regr_slope_filter",
         ),
-        pytest.param(f.regr_count, pa.array([3], type=pa.uint64()), id="regr_count"),
-        pytest.param(f.regr_r2, pa.array([1], type=pa.float64()), id="regr_r2"),
-        pytest.param(f.regr_avgx, pa.array([2], type=pa.float64()), id="regr_avgx"),
-        pytest.param(f.regr_avgy, pa.array([4], type=pa.float64()), id="regr_avgy"),
-        pytest.param(f.regr_sxx, pa.array([2], type=pa.float64()), id="regr_sxx"),
-        pytest.param(f.regr_syy, pa.array([8], type=pa.float64()), id="regr_syy"),
-        pytest.param(f.regr_sxy, pa.array([4], type=pa.float64()), id="regr_sxy"),
+        pytest.param(
+            f.regr_intercept(column("c2"), column("c1")), [-4], id="regr_intercept"
+        ),
+        pytest.param(
+            f.regr_intercept(
+                column("c2"), column("c1"), filter=column("c1") > literal(2)
+            ),
+            [-16],
+            id="regr_intercept_filter",
+        ),
+        pytest.param(f.regr_count(column("c2"), column("c1")), [4], id="regr_count"),
+        pytest.param(
+            f.regr_count(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [2],
+            id="regr_count_filter",
+        ),
+        pytest.param(f.regr_r2(column("c2"), column("c1")), [0.92], id="regr_r2"),
+        pytest.param(
+            f.regr_r2(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [1.0],
+            id="regr_r2_filter",
+        ),
+        pytest.param(f.regr_avgx(column("c2"), column("c1")), [2.5], id="regr_avgx"),
+        pytest.param(
+            f.regr_avgx(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [3.5],
+            id="regr_avgx_filter",
+        ),
+        pytest.param(f.regr_avgy(column("c2"), column("c1")), [7.5], id="regr_avgy"),
+        pytest.param(
+            f.regr_avgy(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [12.0],
+            id="regr_avgy_filter",
+        ),
+        pytest.param(f.regr_sxx(column("c2"), column("c1")), [5.0], id="regr_sxx"),
+        pytest.param(
+            f.regr_sxx(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [0.5],
+            id="regr_sxx_filter",
+        ),
+        pytest.param(f.regr_syy(column("c2"), column("c1")), [115.0], id="regr_syy"),
+        pytest.param(
+            f.regr_syy(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [32.0],
+            id="regr_syy_filter",
+        ),
+        pytest.param(f.regr_sxy(column("c2"), column("c1")), [23.0], id="regr_sxy"),
+        pytest.param(
+            f.regr_sxy(column("c2"), column("c1"), filter=column("c1") > literal(2)),
+            [4.0],
+            id="regr_sxy_filter",
+        ),
     ],
 )
 def test_regr_funcs_df(func, expected):
@@ -932,44 +1094,29 @@ def test_regr_funcs_df(func, expected):
     ctx = SessionContext()
 
     # Create a DataFrame
-    data = {"column1": [1, 2, 3], "column2": [2, 4, 6]}
+    data = {"c1": [1, 2, 3, 4, 5, None], "c2": [2, 4, 8, 16, None, 64]}
     df = ctx.from_pydict(data, name="test_table")
 
     # Perform the regression function using DataFrame API
-    result_df = df.aggregate([], [func(f.col("column2"), f.col("column1"))]).collect()
-
-    # Assertion for DataFrame API result
-    assert result_df[0].column(0) == expected
-
-
-def test_first_last_value(df):
-    df = df.aggregate(
-        [],
-        [
-            f.first_value(column("a")),
-            f.first_value(column("b")),
-            f.first_value(column("d")),
-            f.last_value(column("a")),
-            f.last_value(column("b")),
-            f.last_value(column("d")),
-        ],
-    )
-
-    result = df.collect()
-    result = result[0]
-    assert result.column(0) == pa.array(["Hello"])
-    assert result.column(1) == pa.array([4])
-    assert result.column(2) == pa.array([datetime(2022, 12, 31)])
-    assert result.column(3) == pa.array(["!"])
-    assert result.column(4) == pa.array([6])
-    assert result.column(5) == pa.array([datetime(2020, 7, 2)])
+    df = df.aggregate([], [func.alias("result")])
     df.show()
+
+    expected_dict = {
+        "result": expected,
+    }
+
+    assert df.collect()[0].to_pydict() == expected_dict
 
 
 def test_binary_string_functions(df):
     df = df.select(
-        f.encode(column("a"), literal("base64")),
-        f.decode(f.encode(column("a"), literal("base64")), literal("base64")),
+        f.encode(column("a").cast(pa.string()), literal("base64").cast(pa.string())),
+        f.decode(
+            f.encode(
+                column("a").cast(pa.string()), literal("base64").cast(pa.string())
+            ),
+            literal("base64").cast(pa.string()),
+        ),
     )
     result = df.collect()
     assert len(result) == 1
@@ -978,3 +1125,53 @@ def test_binary_string_functions(df):
     assert pa.array(result.column(1)).cast(pa.string()) == pa.array(
         ["Hello", "World", "!"]
     )
+
+
+@pytest.mark.parametrize(
+    "python_datatype, name, expected",
+    [
+        pytest.param(bool, "e", pa.bool_(), id="bool"),
+        pytest.param(int, "b", pa.int64(), id="int"),
+        pytest.param(float, "b", pa.float64(), id="float"),
+        pytest.param(str, "b", pa.string(), id="str"),
+    ],
+)
+def test_cast(df, python_datatype, name: str, expected):
+    df = df.select(
+        column(name).cast(python_datatype).alias("actual"),
+        column(name).cast(expected).alias("expected"),
+    )
+    result = df.collect()
+    result = result[0]
+    assert result.column(0) == result.column(1)
+
+
+@pytest.mark.parametrize(
+    "negated, low, high, expected",
+    [
+        pytest.param(False, 3, 5, {"filtered": [4, 5]}),
+        pytest.param(False, 4, 5, {"filtered": [4, 5]}),
+        pytest.param(True, 3, 5, {"filtered": [6]}),
+        pytest.param(True, 4, 6, []),
+    ],
+)
+def test_between(df, negated, low, high, expected):
+    df = df.filter(column("b").between(low, high, negated=negated)).select(
+        column("b").alias("filtered")
+    )
+
+    actual = df.collect()
+
+    if expected:
+        actual = actual[0].to_pydict()
+        assert actual == expected
+    else:
+        assert len(actual) == 0  # the rows are empty
+
+
+def test_between_default(df):
+    df = df.filter(column("b").between(3, 5)).select(column("b").alias("filtered"))
+    expected = {"filtered": [4, 5]}
+
+    actual = df.collect()[0].to_pydict()
+    assert actual == expected

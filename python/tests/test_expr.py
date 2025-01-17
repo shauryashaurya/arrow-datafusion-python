@@ -15,18 +15,21 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import pyarrow as pa
+import pytest
 from datafusion import SessionContext, col
-from datafusion.expr import Column, Literal, BinaryExpr, AggregateFunction
 from datafusion.expr import (
-    Projection,
-    Filter,
     Aggregate,
+    AggregateFunction,
+    BinaryExpr,
+    Column,
+    Filter,
     Limit,
+    Literal,
+    Projection,
     Sort,
     TableScan,
 )
-import pyarrow
-import pytest
 
 
 @pytest.fixture
@@ -82,14 +85,18 @@ def test_limit(test_ctx):
 
     plan = plan.to_variant()
     assert isinstance(plan, Limit)
-    assert plan.skip() == 0
+    # TODO: Upstream now has expressions for skip and fetch
+    # REF: https://github.com/apache/datafusion/pull/12836
+    # assert plan.skip() == 0
 
     df = test_ctx.sql("select c1 from test LIMIT 10 OFFSET 5")
     plan = df.logical_plan()
 
     plan = plan.to_variant()
     assert isinstance(plan, Limit)
-    assert plan.skip() == 5
+    # TODO: Upstream now has expressions for skip and fetch
+    # REF: https://github.com/apache/datafusion/pull/12836
+    # assert plan.skip() == 5
 
 
 def test_aggregate_query(test_ctx):
@@ -122,8 +129,11 @@ def test_sort(test_ctx):
 def test_relational_expr(test_ctx):
     ctx = SessionContext()
 
-    batch = pyarrow.RecordBatch.from_arrays(
-        [pyarrow.array([1, 2, 3]), pyarrow.array(["alpha", "beta", "gamma"])],
+    batch = pa.RecordBatch.from_arrays(
+        [
+            pa.array([1, 2, 3]),
+            pa.array(["alpha", "beta", "gamma"], type=pa.string_view()),
+        ],
         names=["a", "b"],
     )
     df = ctx.create_dataframe([[batch]], name="batch_array")
@@ -138,7 +148,8 @@ def test_relational_expr(test_ctx):
     assert df.filter(col("b") == "beta").count() == 1
     assert df.filter(col("b") != "beta").count() == 2
 
-    assert df.filter(col("a") == "beta").count() == 0
+    with pytest.raises(Exception):
+        df.filter(col("a") == "beta").count()
 
 
 def test_expr_to_variant():
@@ -192,3 +203,51 @@ def test_expr_getitem() -> None:
 
     assert names == ["Alice", "Bob", "Charlie", None]
     assert array_values == [2, 5, None, None]
+
+
+def test_display_name_deprecation():
+    import warnings
+
+    expr = col("foo")
+    with warnings.catch_warnings(record=True) as w:
+        # Cause all warnings to always be triggered
+        warnings.simplefilter("always")
+
+        # should trigger warning
+        name = expr.display_name()
+
+        # Verify some things
+        assert len(w) == 1
+        assert issubclass(w[-1].category, DeprecationWarning)
+        assert "deprecated" in str(w[-1].message)
+
+    # returns appropriate result
+    assert name == expr.schema_name()
+    assert name == "foo"
+
+
+@pytest.fixture
+def df():
+    ctx = SessionContext()
+
+    # create a RecordBatch and a new DataFrame from it
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([1, 2, None]), pa.array([4, None, 6]), pa.array([None, None, 8])],
+        names=["a", "b", "c"],
+    )
+
+    return ctx.from_arrow(batch)
+
+
+def test_fill_null(df):
+    df = df.select(
+        col("a").fill_null(100).alias("a"),
+        col("b").fill_null(25).alias("b"),
+        col("c").fill_null(1234).alias("c"),
+    )
+    df.show()
+    result = df.collect()[0]
+
+    assert result.column(0) == pa.array([1, 2, 100])
+    assert result.column(1) == pa.array([4, 25, 6])
+    assert result.column(2) == pa.array([1234, 1234, 8])

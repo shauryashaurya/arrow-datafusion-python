@@ -47,25 +47,23 @@ end_date = lit(datetime.strptime(END_DATE, "%Y-%m-%d").date())
 
 ctx = SessionContext()
 
-df_part = ctx.read_parquet(get_data_path("part.parquet")).select_columns(
-    "p_partkey", "p_type"
-)
-df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select_columns(
+df_part = ctx.read_parquet(get_data_path("part.parquet")).select("p_partkey", "p_type")
+df_supplier = ctx.read_parquet(get_data_path("supplier.parquet")).select(
     "s_suppkey", "s_nationkey"
 )
-df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select_columns(
+df_lineitem = ctx.read_parquet(get_data_path("lineitem.parquet")).select(
     "l_partkey", "l_extendedprice", "l_discount", "l_suppkey", "l_orderkey"
 )
-df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select_columns(
+df_orders = ctx.read_parquet(get_data_path("orders.parquet")).select(
     "o_orderkey", "o_custkey", "o_orderdate"
 )
-df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select_columns(
+df_customer = ctx.read_parquet(get_data_path("customer.parquet")).select(
     "c_custkey", "c_nationkey"
 )
-df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select_columns(
+df_nation = ctx.read_parquet(get_data_path("nation.parquet")).select(
     "n_nationkey", "n_name", "n_regionkey"
 )
-df_region = ctx.read_parquet(get_data_path("region.parquet")).select_columns(
+df_region = ctx.read_parquet(get_data_path("region.parquet")).select(
     "r_regionkey", "r_name"
 )
 
@@ -91,27 +89,27 @@ df_regional_customers = df_region.filter(col("r_name") == customer_region)
 
 # After this join we have all of the possible sales nations
 df_regional_customers = df_regional_customers.join(
-    df_nation, (["r_regionkey"], ["n_regionkey"]), how="inner"
+    df_nation, left_on=["r_regionkey"], right_on=["n_regionkey"], how="inner"
 )
 
 # Now find the possible customers
 df_regional_customers = df_regional_customers.join(
-    df_customer, (["n_nationkey"], ["c_nationkey"]), how="inner"
+    df_customer, left_on=["n_nationkey"], right_on=["c_nationkey"], how="inner"
 )
 
 # Next find orders for these customers
 df_regional_customers = df_regional_customers.join(
-    df_orders, (["c_custkey"], ["o_custkey"]), how="inner"
+    df_orders, left_on=["c_custkey"], right_on=["o_custkey"], how="inner"
 )
 
 # Find all line items from these orders
 df_regional_customers = df_regional_customers.join(
-    df_lineitem, (["o_orderkey"], ["l_orderkey"]), how="inner"
+    df_lineitem, left_on=["o_orderkey"], right_on=["l_orderkey"], how="inner"
 )
 
 # Limit to the part of interest
 df_regional_customers = df_regional_customers.join(
-    df_part, (["l_partkey"], ["p_partkey"]), how="inner"
+    df_part, left_on=["l_partkey"], right_on=["p_partkey"], how="inner"
 )
 
 # Compute the volume for each line item
@@ -128,12 +126,12 @@ df_national_suppliers = df_nation.filter(col("n_name") == supplier_nation)
 
 # Determine the suppliers by the limited nation key we have in our single row df above
 df_national_suppliers = df_national_suppliers.join(
-    df_supplier, (["n_nationkey"], ["s_nationkey"]), how="inner"
+    df_supplier, left_on=["n_nationkey"], right_on=["s_nationkey"], how="inner"
 )
 
 # When we join to the customer dataframe, we don't want to confuse other columns, so only
 # select the supplier key that we need
-df_national_suppliers = df_national_suppliers.select_columns("s_suppkey")
+df_national_suppliers = df_national_suppliers.select("s_suppkey")
 
 
 # Part 3: Combine suppliers and customers and compute the market share
@@ -143,7 +141,7 @@ df_national_suppliers = df_national_suppliers.select_columns("s_suppkey")
 # column only from suppliers in the nation we are evaluating.
 
 df = df_regional_customers.join(
-    df_national_suppliers, (["l_suppkey"], ["s_suppkey"]), how="left"
+    df_national_suppliers, left_on=["l_suppkey"], right_on=["s_suppkey"], how="left"
 )
 
 # Use a case statement to compute the volume sold by suppliers in the nation of interest

@@ -20,19 +20,17 @@
 from __future__ import annotations
 
 from ._internal import SessionConfig as SessionConfigInternal
-from ._internal import RuntimeConfig as RuntimeConfigInternal
+from ._internal import RuntimeEnvBuilder as RuntimeEnvBuilderInternal
 from ._internal import SQLOptions as SQLOptionsInternal
 from ._internal import SessionContext as SessionContextInternal
-from ._internal import LogicalPlan, ExecutionPlan
 
-from datafusion._internal import AggregateUDF
 from datafusion.catalog import Catalog, Table
 from datafusion.dataframe import DataFrame
-from datafusion.expr import Expr
+from datafusion.expr import Expr, SortExpr, sort_list_to_raw_sort_list
 from datafusion.record_batch import RecordBatchStream
-from datafusion.udf import ScalarUDF
+from datafusion.udf import ScalarUDF, AggregateUDF, WindowUDF
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Protocol
 from typing_extensions import deprecated
 
 if TYPE_CHECKING:
@@ -40,6 +38,38 @@ if TYPE_CHECKING:
     import pandas
     import polars
     import pathlib
+    from datafusion.plan import LogicalPlan, ExecutionPlan
+
+
+class ArrowStreamExportable(Protocol):
+    """Type hint for object exporting Arrow C Stream via Arrow PyCapsule Interface.
+
+    https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html
+    """
+
+    def __arrow_c_stream__(  # noqa: D105
+        self, requested_schema: object | None = None
+    ) -> object: ...
+
+
+class ArrowArrayExportable(Protocol):
+    """Type hint for object exporting Arrow C Array via Arrow PyCapsule Interface.
+
+    https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html
+    """
+
+    def __arrow_c_array__(  # noqa: D105
+        self, requested_schema: object | None = None
+    ) -> tuple[object, object]: ...
+
+
+class TableProviderExportable(Protocol):
+    """Type hint for object that has __datafusion_table_provider__ PyCapsule.
+
+    https://datafusion.apache.org/python/user-guide/io/table_provider.html
+    """
+
+    def __datafusion_table_provider__(self) -> object: ...  # noqa: D105
 
 
 class SessionConfig:
@@ -73,7 +103,7 @@ class SessionConfig:
     def with_default_catalog_and_schema(
         self, catalog: str, schema: str
     ) -> SessionConfig:
-        """Select a name for the default catalog and shcema.
+        """Select a name for the default catalog and schema.
 
         Args:
             catalog: Catalog name.
@@ -235,54 +265,58 @@ class SessionConfig:
         return self
 
 
-class RuntimeConfig:
+class RuntimeEnvBuilder:
     """Runtime configuration options."""
 
     def __init__(self) -> None:
-        """Create a new :py:class:`RuntimeConfig` with default values."""
-        self.config_internal = RuntimeConfigInternal()
+        """Create a new :py:class:`RuntimeEnvBuilder` with default values."""
+        self.config_internal = RuntimeEnvBuilderInternal()
 
-    def with_disk_manager_disabled(self) -> RuntimeConfig:
+    def with_disk_manager_disabled(self) -> RuntimeEnvBuilder:
         """Disable the disk manager, attempts to create temporary files will error.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
         """
         self.config_internal = self.config_internal.with_disk_manager_disabled()
         return self
 
-    def with_disk_manager_os(self) -> RuntimeConfig:
+    def with_disk_manager_os(self) -> RuntimeEnvBuilder:
         """Use the operating system's temporary directory for disk manager.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
         """
         self.config_internal = self.config_internal.with_disk_manager_os()
         return self
 
-    def with_disk_manager_specified(self, *paths: str | pathlib.Path) -> RuntimeConfig:
+    def with_disk_manager_specified(
+        self, *paths: str | pathlib.Path
+    ) -> RuntimeEnvBuilder:
         """Use the specified paths for the disk manager's temporary files.
 
         Args:
             paths: Paths to use for the disk manager's temporary files.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
         """
-        paths = [str(p) for p in paths]
-        self.config_internal = self.config_internal.with_disk_manager_specified(paths)
+        paths_list = [str(p) for p in paths]
+        self.config_internal = self.config_internal.with_disk_manager_specified(
+            paths_list
+        )
         return self
 
-    def with_unbounded_memory_pool(self) -> RuntimeConfig:
+    def with_unbounded_memory_pool(self) -> RuntimeEnvBuilder:
         """Use an unbounded memory pool.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
         """
         self.config_internal = self.config_internal.with_unbounded_memory_pool()
         return self
 
-    def with_fair_spill_pool(self, size: int) -> RuntimeConfig:
+    def with_fair_spill_pool(self, size: int) -> RuntimeEnvBuilder:
         """Use a fair spill pool with the specified size.
 
         This pool works best when you know beforehand the query has multiple spillable
@@ -303,16 +337,16 @@ class RuntimeConfig:
             size: Size of the memory pool in bytes.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
 
         Examples usage::
 
-            config = RuntimeConfig().with_fair_spill_pool(1024)
+            config = RuntimeEnvBuilder().with_fair_spill_pool(1024)
         """
         self.config_internal = self.config_internal.with_fair_spill_pool(size)
         return self
 
-    def with_greedy_memory_pool(self, size: int) -> RuntimeConfig:
+    def with_greedy_memory_pool(self, size: int) -> RuntimeEnvBuilder:
         """Use a greedy memory pool with the specified size.
 
         This pool works well for queries that do not need to spill or have a single
@@ -323,30 +357,37 @@ class RuntimeConfig:
             size: Size of the memory pool in bytes.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
 
         Example usage::
 
-            config = RuntimeConfig().with_greedy_memory_pool(1024)
+            config = RuntimeEnvBuilder().with_greedy_memory_pool(1024)
         """
         self.config_internal = self.config_internal.with_greedy_memory_pool(size)
         return self
 
-    def with_temp_file_path(self, path: str | pathlib.Path) -> RuntimeConfig:
+    def with_temp_file_path(self, path: str | pathlib.Path) -> RuntimeEnvBuilder:
         """Use the specified path to create any needed temporary files.
 
         Args:
             path: Path to use for temporary files.
 
         Returns:
-            A new :py:class:`RuntimeConfig` object with the updated setting.
+            A new :py:class:`RuntimeEnvBuilder` object with the updated setting.
 
         Example usage::
 
-            config = RuntimeConfig().with_temp_file_path("/tmp")
+            config = RuntimeEnvBuilder().with_temp_file_path("/tmp")
         """
         self.config_internal = self.config_internal.with_temp_file_path(str(path))
         return self
+
+
+@deprecated("Use `RuntimeEnvBuilder` instead.")
+class RuntimeConfig(RuntimeEnvBuilder):
+    """See `RuntimeEnvBuilder`."""
+
+    pass
 
 
 class SQLOptions:
@@ -422,7 +463,9 @@ class SessionContext:
     """
 
     def __init__(
-        self, config: SessionConfig | None = None, runtime: RuntimeConfig | None = None
+        self,
+        config: SessionConfig | None = None,
+        runtime: RuntimeEnvBuilder | None = None,
     ) -> None:
         """Main interface for executing queries with DataFusion.
 
@@ -449,7 +492,20 @@ class SessionContext:
 
         self.ctx = SessionContextInternal(config, runtime)
 
-    def register_object_store(self, schema: str, store: Any, host: str | None) -> None:
+    def enable_url_table(self) -> "SessionContext":
+        """Control if local files can be queried as tables.
+
+        Returns:
+            A new :py:class:`SessionContext` object with url table enabled.
+        """
+        klass = self.__class__
+        obj = klass.__new__(klass)
+        obj.ctx = self.ctx.enable_url_table()
+        return obj
+
+    def register_object_store(
+        self, schema: str, store: Any, host: str | None = None
+    ) -> None:
         """Add a new object store into the session.
 
         Args:
@@ -466,7 +522,7 @@ class SessionContext:
         table_partition_cols: list[tuple[str, str]] | None = None,
         file_extension: str = ".parquet",
         schema: pyarrow.Schema | None = None,
-        file_sort_order: list[list[Expr]] | None = None,
+        file_sort_order: list[list[Expr | SortExpr]] | None = None,
     ) -> None:
         """Register multiple files as a single table.
 
@@ -484,15 +540,18 @@ class SessionContext:
         """
         if table_partition_cols is None:
             table_partition_cols = []
-        if file_sort_order is not None:
-            file_sort_order = [[x.expr for x in xs] for xs in file_sort_order]
+        file_sort_order_raw = (
+            [sort_list_to_raw_sort_list(f) for f in file_sort_order]
+            if file_sort_order is not None
+            else None
+        )
         self.ctx.register_listing_table(
             name,
             str(path),
             table_partition_cols,
             file_extension,
             schema,
-            file_sort_order,
+            file_sort_order_raw,
         )
 
     def sql(self, query: str, options: SQLOptions | None = None) -> DataFrame:
@@ -517,7 +576,7 @@ class SessionContext:
     def sql_with_options(self, query: str, options: SQLOptions) -> DataFrame:
         """Create a :py:class:`~datafusion.dataframe.DataFrame` from SQL query text.
 
-        This function will first validating that the query is allowed by the
+        This function will first validate that the query is allowed by the
         provided options.
 
         Args:
@@ -556,7 +615,7 @@ class SessionContext:
         Returns:
             DataFrame representation of the logical plan.
         """
-        return DataFrame(self.ctx.create_dataframe_from_logical_plan(plan))
+        return DataFrame(self.ctx.create_dataframe_from_logical_plan(plan._raw_plan))
 
     def from_pylist(
         self, data: list[dict[str, Any]], name: str | None = None
@@ -586,12 +645,18 @@ class SessionContext:
         """
         return DataFrame(self.ctx.from_pydict(data, name))
 
-    def from_arrow(self, data: Any, name: str | None = None) -> DataFrame:
+    def from_arrow(
+        self,
+        data: ArrowStreamExportable | ArrowArrayExportable,
+        name: str | None = None,
+    ) -> DataFrame:
         """Create a :py:class:`~datafusion.dataframe.DataFrame` from an Arrow source.
 
         The Arrow data source can be any object that implements either
         ``__arrow_c_stream__`` or ``__arrow_c_array__``. For the latter, it must return
-        a struct array. Common examples of sources from pyarrow include
+        a struct array.
+
+        Arrow data can be Polars, Pandas, Pyarrow etc.
 
         Args:
             data: Arrow data source.
@@ -636,18 +701,30 @@ class SessionContext:
         """
         return DataFrame(self.ctx.from_polars(data, name))
 
-    def register_table(self, name: str, table: pyarrow.Table) -> None:
-        """Register a table with the given name into the session.
+    def register_table(self, name: str, table: Table) -> None:
+        """Register a :py:class: `~datafusion.catalog.Table` as a table.
+
+        The registered table can be referenced from SQL statement executed against.
 
         Args:
             name: Name of the resultant table.
-            table: PyArrow table to add to the session context.
+            table: DataFusion table to add to the session context.
         """
         self.ctx.register_table(name, table)
 
     def deregister_table(self, name: str) -> None:
         """Remove a table from the session."""
         self.ctx.deregister_table(name)
+
+    def register_table_provider(
+        self, name: str, provider: TableProviderExportable
+    ) -> None:
+        """Register a table provider.
+
+        This table provider must have a method called ``__datafusion_table_provider__``
+        which returns a PyCapsule that exposes a ``FFI_TableProvider``.
+        """
+        self.ctx.register_table_provider(name, provider)
 
     def register_record_batches(
         self, name: str, partitions: list[list[pyarrow.RecordBatch]]
@@ -709,7 +786,7 @@ class SessionContext:
     def register_csv(
         self,
         name: str,
-        path: str | pathlib.Path,
+        path: str | pathlib.Path | list[str | pathlib.Path],
         schema: pyarrow.Schema | None = None,
         has_header: bool = True,
         delimiter: str = ",",
@@ -723,7 +800,7 @@ class SessionContext:
 
         Args:
             name: Name of the table to register.
-            path: Path to the CSV file.
+            path: Path to the CSV file. It also accepts a list of Paths.
             schema: An optional schema representing the CSV file. If None, the
                 CSV reader will try to infer it based on data in file.
             has_header: Whether the CSV file have a header. If schema inference
@@ -736,9 +813,14 @@ class SessionContext:
                 selected for data input.
             file_compression_type: File compression type.
         """
+        if isinstance(path, list):
+            path = [str(p) for p in path]
+        else:
+            path = str(path)
+
         self.ctx.register_csv(
             name,
-            str(path),
+            path,
             schema,
             has_header,
             delimiter,
@@ -827,6 +909,10 @@ class SessionContext:
     def register_udaf(self, udaf: AggregateUDF) -> None:
         """Register a user-defined aggregation function (UDAF) with the context."""
         self.ctx.register_udaf(udaf._udaf)
+
+    def register_udwf(self, udwf: WindowUDF) -> None:
+        """Register a user-defined window function (UDWF) with the context."""
+        self.ctx.register_udwf(udwf._udwf)
 
     def catalog(self, name: str = "datafusion") -> Catalog:
         """Retrieve a catalog by name."""
@@ -1021,4 +1107,4 @@ class SessionContext:
 
     def execute(self, plan: ExecutionPlan, partitions: int) -> RecordBatchStream:
         """Execute the ``plan`` and return the results."""
-        return RecordBatchStream(self.ctx.execute(plan, partitions))
+        return RecordBatchStream(self.ctx.execute(plan._raw_plan, partitions))

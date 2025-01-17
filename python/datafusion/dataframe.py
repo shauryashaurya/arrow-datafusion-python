@@ -20,24 +20,86 @@ See :ref:`user_guide_concepts` in the online documentation for more information.
 """
 
 from __future__ import annotations
-
-from typing import Any, List, TYPE_CHECKING
+import warnings
+from typing import (
+    Any,
+    Iterable,
+    List,
+    TYPE_CHECKING,
+    Literal,
+    overload,
+    Optional,
+    Union,
+)
 from datafusion.record_batch import RecordBatchStream
 from typing_extensions import deprecated
+from datafusion.plan import LogicalPlan, ExecutionPlan
 
 if TYPE_CHECKING:
     import pyarrow as pa
     import pandas as pd
     import polars as pl
     import pathlib
-    from typing import Callable
+    from typing import Callable, Sequence
 
 from datafusion._internal import DataFrame as DataFrameInternal
-from datafusion.expr import Expr
-from datafusion._internal import (
-    LogicalPlan,
-    ExecutionPlan,
-)
+from datafusion.expr import Expr, SortExpr, sort_or_default
+from enum import Enum
+
+
+# excerpt from deltalake
+# https://github.com/apache/datafusion-python/pull/981#discussion_r1905619163
+class Compression(Enum):
+    """Enum representing the available compression types for Parquet files."""
+
+    UNCOMPRESSED = "uncompressed"
+    SNAPPY = "snappy"
+    GZIP = "gzip"
+    BROTLI = "brotli"
+    LZ4 = "lz4"
+    # lzo is not implemented yet
+    # https://github.com/apache/arrow-rs/issues/6970
+    # LZO = "lzo"
+    ZSTD = "zstd"
+    LZ4_RAW = "lz4_raw"
+
+    @classmethod
+    def from_str(cls, value: str) -> "Compression":
+        """Convert a string to a Compression enum value.
+
+        Args:
+            value: The string representation of the compression type.
+
+        Returns:
+            The Compression enum lowercase value.
+
+        Raises:
+            ValueError: If the string does not match any Compression enum value.
+        """
+        try:
+            return cls(value.lower())
+        except ValueError:
+            raise ValueError(
+                f"{value} is not a valid Compression. Valid values are: {[item.value for item in Compression]}"
+            )
+
+    def get_default_level(self) -> Optional[int]:
+        """Get the default compression level for the compression type.
+
+        Returns:
+            The default compression level for the compression type.
+        """
+        # GZIP, BROTLI default values from deltalake repo
+        # https://github.com/apache/datafusion-python/pull/981#discussion_r1905619163
+        # ZSTD default value from delta-rs
+        # https://github.com/apache/datafusion-python/pull/981#discussion_r1904789223
+        if self == Compression.GZIP:
+            return 6
+        elif self == Compression.BROTLI:
+            return 1
+        elif self == Compression.ZSTD:
+            return 4
+        return None
 
 
 class DataFrame:
@@ -100,6 +162,9 @@ class DataFrame:
         """
         return self.df.schema()
 
+    @deprecated(
+        "select_columns() is deprecated. Use :py:meth:`~DataFrame.select` instead"
+    )
     def select_columns(self, *args: str) -> DataFrame:
         """Filter the DataFrame by columns.
 
@@ -132,6 +197,17 @@ class DataFrame:
         ]
         return DataFrame(self.df.select(*exprs_internal))
 
+    def drop(self, *columns: str) -> DataFrame:
+        """Drop arbitrary amount of columns.
+
+        Args:
+            columns: Column names to drop from the dataframe.
+
+        Returns:
+            DataFrame with those columns removed in the projection.
+        """
+        return DataFrame(self.df.drop(*columns))
+
     def filter(self, *predicates: Expr) -> DataFrame:
         """Return a DataFrame for which ``predicate`` evaluates to ``True``.
 
@@ -163,6 +239,51 @@ class DataFrame:
         """
         return DataFrame(self.df.with_column(name, expr.expr))
 
+    def with_columns(
+        self, *exprs: Expr | Iterable[Expr], **named_exprs: Expr
+    ) -> DataFrame:
+        """Add columns to the DataFrame.
+
+        By passing expressions, iteratables of expressions, or named expressions. To
+        pass named expressions use the form name=Expr.
+
+        Example usage: The following will add 4 columns labeled a, b, c, and d::
+
+            df = df.with_columns(
+                lit(0).alias('a'),
+                [lit(1).alias('b'), lit(2).alias('c')],
+                d=lit(3)
+                )
+
+        Args:
+            exprs: Either a single expression or an iterable of expressions to add.
+            named_exprs: Named expressions in the form of ``name=expr``
+
+        Returns:
+            DataFrame with the new columns added.
+        """
+
+        def _simplify_expression(
+            *exprs: Expr | Iterable[Expr], **named_exprs: Expr
+        ) -> list[Expr]:
+            expr_list = []
+            for expr in exprs:
+                if isinstance(expr, Expr):
+                    expr_list.append(expr.expr)
+                elif isinstance(expr, Iterable):
+                    for inner_expr in expr:
+                        expr_list.append(inner_expr.expr)
+                else:
+                    raise NotImplementedError
+            if named_exprs:
+                for alias, expr in named_exprs.items():
+                    expr_list.append(expr.alias(alias).expr)
+            return expr_list
+
+        expressions = _simplify_expression(*exprs, **named_exprs)
+
+        return DataFrame(self.df.with_columns(expressions))
+
     def with_column_renamed(self, old_name: str, new_name: str) -> DataFrame:
         r"""Rename one column by applying a new projection.
 
@@ -180,7 +301,9 @@ class DataFrame:
         """
         return DataFrame(self.df.with_column_renamed(old_name, new_name))
 
-    def aggregate(self, group_by: list[Expr], aggs: list[Expr]) -> DataFrame:
+    def aggregate(
+        self, group_by: list[Expr] | Expr, aggs: list[Expr] | Expr
+    ) -> DataFrame:
         """Aggregates the rows of the current DataFrame.
 
         Args:
@@ -190,11 +313,14 @@ class DataFrame:
         Returns:
             DataFrame after aggregation.
         """
+        group_by = group_by if isinstance(group_by, list) else [group_by]
+        aggs = aggs if isinstance(aggs, list) else [aggs]
+
         group_by = [e.expr for e in group_by]
         aggs = [e.expr for e in aggs]
         return DataFrame(self.df.aggregate(group_by, aggs))
 
-    def sort(self, *exprs: Expr) -> DataFrame:
+    def sort(self, *exprs: Expr | SortExpr) -> DataFrame:
         """Sort the DataFrame by the specified sorting expressions.
 
         Note that any expression can be turned into a sort expression by
@@ -206,8 +332,20 @@ class DataFrame:
         Returns:
             DataFrame after sorting.
         """
-        exprs = [expr.expr for expr in exprs]
-        return DataFrame(self.df.sort(*exprs))
+        exprs_raw = [sort_or_default(expr) for expr in exprs]
+        return DataFrame(self.df.sort(*exprs_raw))
+
+    def cast(self, mapping: dict[str, pa.DataType[Any]]) -> DataFrame:
+        """Cast one or more columns to a different data type.
+
+        Args:
+            mapping: Mapped with column as key and column dtype as value.
+
+        Returns:
+            DataFrame after casting columns
+        """
+        exprs = [Expr.column(col).cast(dtype) for col, dtype in mapping.items()]
+        return self.with_columns(exprs)
 
     def limit(self, count: int, offset: int = 0) -> DataFrame:
         """Return a new :py:class:`DataFrame` with a limited number of rows.
@@ -220,6 +358,31 @@ class DataFrame:
             DataFrame after limiting.
         """
         return DataFrame(self.df.limit(count, offset))
+
+    def head(self, n: int = 5) -> DataFrame:
+        """Return a new :py:class:`DataFrame` with a limited number of rows.
+
+        Args:
+            n: Number of rows to take from the head of the DataFrame.
+
+        Returns:
+            DataFrame after limiting.
+        """
+        return DataFrame(self.df.limit(n, 0))
+
+    def tail(self, n: int = 5) -> DataFrame:
+        """Return a new :py:class:`DataFrame` with a limited number of rows.
+
+        Be aware this could be potentially expensive since the row size needs to be
+        determined of the dataframe. This is done by collecting it.
+
+        Args:
+            n: Number of rows to take from the tail of the DataFrame.
+
+        Returns:
+            DataFrame after limiting.
+        """
+        return DataFrame(self.df.limit(n, max(0, self.count() - n)))
 
     def collect(self) -> list[pa.RecordBatch]:
         """Execute this :py:class:`DataFrame` and collect results into memory.
@@ -269,27 +432,128 @@ class DataFrame:
         """
         return DataFrame(self.df.distinct())
 
+    @overload
     def join(
         self,
         right: DataFrame,
+        on: str | Sequence[str],
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+        *,
+        left_on: None = None,
+        right_on: None = None,
+        join_keys: None = None,
+    ) -> DataFrame: ...
+
+    @overload
+    def join(
+        self,
+        right: DataFrame,
+        on: None = None,
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+        *,
+        left_on: str | Sequence[str],
+        right_on: str | Sequence[str],
+        join_keys: tuple[list[str], list[str]] | None = None,
+    ) -> DataFrame: ...
+
+    @overload
+    def join(
+        self,
+        right: DataFrame,
+        on: None = None,
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+        *,
         join_keys: tuple[list[str], list[str]],
-        how: str,
+        left_on: None = None,
+        right_on: None = None,
+    ) -> DataFrame: ...
+
+    def join(
+        self,
+        right: DataFrame,
+        on: str | Sequence[str] | tuple[list[str], list[str]] | None = None,
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+        *,
+        left_on: str | Sequence[str] | None = None,
+        right_on: str | Sequence[str] | None = None,
+        join_keys: tuple[list[str], list[str]] | None = None,
     ) -> DataFrame:
         """Join this :py:class:`DataFrame` with another :py:class:`DataFrame`.
 
-        Join keys are a pair of lists of column names in the left and right
-        dataframes, respectively. These lists must have the same length.
+        `on` has to be provided or both `left_on` and `right_on` in conjunction.
 
         Args:
             right: Other DataFrame to join with.
-            join_keys: Tuple of two lists of column names to join on.
+            on: Column names to join on in both dataframes.
+            how: Type of join to perform. Supported types are "inner", "left",
+                "right", "full", "semi", "anti".
+            left_on: Join column of the left dataframe.
+            right_on: Join column of the right dataframe.
+            join_keys: Tuple of two lists of column names to join on. [Deprecated]
+
+        Returns:
+            DataFrame after join.
+        """
+        # This check is to prevent breaking API changes where users prior to
+        # DF 43.0.0 would  pass the join_keys as a positional argument instead
+        # of a keyword argument.
+        if isinstance(on, tuple) and len(on) == 2:
+            if isinstance(on[0], list) and isinstance(on[1], list):
+                join_keys = on  # type: ignore
+                on = None
+
+        if join_keys is not None:
+            warnings.warn(
+                "`join_keys` is deprecated, use `on` or `left_on` with `right_on`",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+            left_on = join_keys[0]
+            right_on = join_keys[1]
+
+        if on is not None:
+            if left_on is not None or right_on is not None:
+                raise ValueError(
+                    "`left_on` or `right_on` should not provided with `on`"
+                )
+            left_on = on
+            right_on = on
+        elif left_on is not None or right_on is not None:
+            if left_on is None or right_on is None:
+                raise ValueError("`left_on` and `right_on` should both be provided.")
+        else:
+            raise ValueError(
+                "either `on` or `left_on` and `right_on` should be provided."
+            )
+        if isinstance(left_on, str):
+            left_on = [left_on]
+        if isinstance(right_on, str):
+            right_on = [right_on]
+
+        return DataFrame(self.df.join(right.df, how, left_on, right_on))
+
+    def join_on(
+        self,
+        right: DataFrame,
+        *on_exprs: Expr,
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+    ) -> DataFrame:
+        """Join two :py:class:`DataFrame` using the specified expressions.
+
+        On expressions are used to support in-equality predicates. Equality
+        predicates are correctly optimized
+
+        Args:
+            right: Other DataFrame to join with.
+            on_exprs: single or multiple (in)-equality predicates.
             how: Type of join to perform. Supported types are "inner", "left",
                 "right", "full", "semi", "anti".
 
         Returns:
             DataFrame after join.
         """
-        return DataFrame(self.df.join(right.df, join_keys, how))
+        exprs = [expr.expr for expr in on_exprs]
+        return DataFrame(self.df.join_on(right.df, exprs, how))
 
     def explain(self, verbose: bool = False, analyze: bool = False) -> DataFrame:
         """Return a DataFrame with the explanation of its plan so far.
@@ -311,7 +575,7 @@ class DataFrame:
         Returns:
             Unoptimized logical plan.
         """
-        return self.df.logical_plan()
+        return LogicalPlan(self.df.logical_plan())
 
     def optimized_logical_plan(self) -> LogicalPlan:
         """Return the optimized ``LogicalPlan``.
@@ -319,7 +583,7 @@ class DataFrame:
         Returns:
             Optimized logical plan.
         """
-        return self.df.optimized_logical_plan()
+        return LogicalPlan(self.df.optimized_logical_plan())
 
     def execution_plan(self) -> ExecutionPlan:
         """Return the execution/physical plan.
@@ -327,7 +591,7 @@ class DataFrame:
         Returns:
             Execution plan.
         """
-        return self.df.execution_plan()
+        return ExecutionPlan(self.df.execution_plan())
 
     def repartition(self, num: int) -> DataFrame:
         """Repartition a DataFrame into ``num`` partitions.
@@ -421,17 +685,36 @@ class DataFrame:
     def write_parquet(
         self,
         path: str | pathlib.Path,
-        compression: str = "uncompressed",
+        compression: Union[str, Compression] = Compression.ZSTD,
         compression_level: int | None = None,
     ) -> None:
         """Execute the :py:class:`DataFrame` and write the results to a Parquet file.
 
         Args:
             path: Path of the Parquet file to write.
-            compression: Compression type to use.
-            compression_level: Compression level to use.
+            compression: Compression type to use. Default is "ZSTD".
+                Available compression types are:
+                - "uncompressed": No compression.
+                - "snappy": Snappy compression.
+                - "gzip": Gzip compression.
+                - "brotli": Brotli compression.
+                - "lz4": LZ4 compression.
+                - "lz4_raw": LZ4_RAW compression.
+                - "zstd": Zstandard compression.
+            Note: LZO is not yet implemented in arrow-rs and is therefore excluded.
+            compression_level: Compression level to use. For ZSTD, the
+                recommended range is 1 to 22, with the default being 4. Higher levels
+                provide better compression but slower speed.
         """
-        self.df.write_parquet(str(path), compression, compression_level)
+        # Convert string to Compression enum if necessary
+        if isinstance(compression, str):
+            compression = Compression.from_str(compression)
+
+        if compression in {Compression.GZIP, Compression.BROTLI, Compression.ZSTD}:
+            if compression_level is None:
+                compression_level = compression.get_default_level()
+
+        self.df.write_parquet(str(path), compression.value, compression_level)
 
     def write_json(self, path: str | pathlib.Path) -> None:
         """Execute the :py:class:`DataFrame` and write the results to a JSON file.

@@ -22,14 +22,17 @@ See :ref:`Expressions` in the online documentation for more details.
 
 from __future__ import annotations
 
-from ._internal import (
-    expr as expr_internal,
-    LogicalPlan,
-    functions as functions_internal,
-)
-from datafusion.common import NullTreatment, RexType, DataTypeMap
-from typing import Any, Optional
+from typing import Any, Optional, Type, TYPE_CHECKING
+
 import pyarrow as pa
+from datafusion.common import DataTypeMap, NullTreatment, RexType
+from typing_extensions import deprecated
+
+from ._internal import expr as expr_internal
+from ._internal import functions as functions_internal
+
+if TYPE_CHECKING:
+    from datafusion.plan import LogicalPlan
 
 # The following are imported from the internal representation. We may choose to
 # give these all proper wrappers, or to simply leave as is. These were added
@@ -48,7 +51,6 @@ Cast = expr_internal.Cast
 Column = expr_internal.Column
 CreateMemoryTable = expr_internal.CreateMemoryTable
 CreateView = expr_internal.CreateView
-CrossJoin = expr_internal.CrossJoin
 Distinct = expr_internal.Distinct
 DropTable = expr_internal.DropTable
 EmptyRelation = expr_internal.EmptyRelation
@@ -84,7 +86,6 @@ ScalarSubquery = expr_internal.ScalarSubquery
 ScalarVariable = expr_internal.ScalarVariable
 SimilarTo = expr_internal.SimilarTo
 Sort = expr_internal.Sort
-SortExpr = expr_internal.SortExpr
 Subquery = expr_internal.Subquery
 SubqueryAlias = expr_internal.SubqueryAlias
 TableScan = expr_internal.TableScan
@@ -92,7 +93,7 @@ TryCast = expr_internal.TryCast
 Union = expr_internal.Union
 Unnest = expr_internal.Unnest
 UnnestExpr = expr_internal.UnnestExpr
-Window = expr_internal.Window
+WindowExpr = expr_internal.WindowExpr
 
 __all__ = [
     "Expr",
@@ -138,7 +139,6 @@ __all__ = [
     "Join",
     "JoinType",
     "JoinConstraint",
-    "CrossJoin",
     "Union",
     "Unnest",
     "UnnestExpr",
@@ -154,9 +154,31 @@ __all__ = [
     "Partitioning",
     "Repartition",
     "Window",
+    "WindowExpr",
     "WindowFrame",
     "WindowFrameBound",
 ]
+
+
+def expr_list_to_raw_expr_list(
+    expr_list: Optional[list[Expr]],
+) -> Optional[list[expr_internal.Expr]]:
+    """Helper function to convert an optional list to raw expressions."""
+    return [e.expr for e in expr_list] if expr_list is not None else None
+
+
+def sort_or_default(e: Expr | SortExpr) -> expr_internal.SortExpr:
+    """Helper function to return a default Sort if an Expr is provided."""
+    if isinstance(e, SortExpr):
+        return e.raw_sort
+    return SortExpr(e.expr, True, True).raw_sort
+
+
+def sort_list_to_raw_sort_list(
+    sort_list: Optional[list[Expr | SortExpr]],
+) -> Optional[list[expr_internal.SortExpr]]:
+    """Helper function to return an optional sort list to raw variant."""
+    return [sort_or_default(e) for e in sort_list] if sort_list is not None else None
 
 
 class Expr:
@@ -174,12 +196,22 @@ class Expr:
         """Convert this expression into a python object if possible."""
         return self.expr.to_variant()
 
+    @deprecated(
+        "display_name() is deprecated. Use :py:meth:`~Expr.schema_name` instead"
+    )
     def display_name(self) -> str:
         """Returns the name of this expression as it should appear in a schema.
 
         This name will not include any CAST expressions.
         """
-        return self.expr.display_name()
+        return self.schema_name()
+
+    def schema_name(self) -> str:
+        """Returns the name of this expression as it should appear in a schema.
+
+        This name will not include any CAST expressions.
+        """
+        return self.expr.schema_name()
 
     def canonical_name(self) -> str:
         """Returns a complete string representation of this expression."""
@@ -266,7 +298,7 @@ class Expr:
 
         If ``key`` is a string, returns the subfield of the struct.
         If ``key`` is an integer, retrieves the element in the array. Note that the
-        element index begins at ``0``, unlike `array_element` which begines at ``1``.
+        element index begins at ``0``, unlike `array_element` which begins at ``1``.
         """
         if isinstance(key, int):
             return Expr(
@@ -342,9 +374,27 @@ class Expr:
 
         ``value`` must be a valid PyArrow scalar value or easily castable to one.
         """
+        if isinstance(value, str):
+            value = pa.scalar(value, type=pa.string_view())
         if not isinstance(value, pa.Scalar):
             value = pa.scalar(value)
         return Expr(expr_internal.Expr.literal(value))
+
+    @staticmethod
+    def string_literal(value: str) -> Expr:
+        """Creates a new expression representing a UTF8 literal value.
+
+        It is different from `literal` because it is pa.string() instead of
+        pa.string_view()
+
+        This is needed for cases where DataFusion is expecting a UTF8 instead of
+        UTF8View literal, like in:
+        https://github.com/apache/datafusion/blob/86740bfd3d9831d6b7c1d0e1bf4a21d91598a0ac/datafusion/functions/src/core/arrow_cast.rs#L179
+        """
+        if isinstance(value, str):
+            value = pa.scalar(value, type=pa.string())
+            return Expr(expr_internal.Expr.literal(value))
+        return Expr.literal(value)
 
     @staticmethod
     def column(value: str) -> Expr:
@@ -355,14 +405,14 @@ class Expr:
         """Assign a name to the expression."""
         return Expr(self.expr.alias(name))
 
-    def sort(self, ascending: bool = True, nulls_first: bool = True) -> Expr:
+    def sort(self, ascending: bool = True, nulls_first: bool = True) -> SortExpr:
         """Creates a sort :py:class:`Expr` from an existing :py:class:`Expr`.
 
         Args:
             ascending: If true, sort in ascending order.
             nulls_first: Return null values first.
         """
-        return Expr(self.expr.sort(ascending=ascending, nulls_first=nulls_first))
+        return SortExpr(self.expr, ascending=ascending, nulls_first=nulls_first)
 
     def is_null(self) -> Expr:
         """Returns ``True`` if this expression is null."""
@@ -372,9 +422,54 @@ class Expr:
         """Returns ``True`` if this expression is not null."""
         return Expr(self.expr.is_not_null())
 
-    def cast(self, to: pa.DataType[Any]) -> Expr:
+    def fill_nan(self, value: Any | Expr | None = None) -> Expr:
+        """Fill NaN values with a provided value."""
+        if not isinstance(value, Expr):
+            value = Expr.literal(value)
+        return Expr(functions_internal.nanvl(self.expr, value.expr))
+
+    def fill_null(self, value: Any | Expr | None = None) -> Expr:
+        """Fill NULL values with a provided value."""
+        if not isinstance(value, Expr):
+            value = Expr.literal(value)
+        return Expr(functions_internal.nvl(self.expr, value.expr))
+
+    _to_pyarrow_types = {
+        float: pa.float64(),
+        int: pa.int64(),
+        str: pa.string(),
+        bool: pa.bool_(),
+    }
+
+    def cast(
+        self, to: pa.DataType[Any] | Type[float] | Type[int] | Type[str] | Type[bool]
+    ) -> Expr:
         """Cast to a new data type."""
+        if not isinstance(to, pa.DataType):
+            try:
+                to = self._to_pyarrow_types[to]
+            except KeyError:
+                raise TypeError(
+                    "Expected instance of pyarrow.DataType or builtins.type"
+                )
+
         return Expr(self.expr.cast(to))
+
+    def between(self, low: Any, high: Any, negated: bool = False) -> Expr:
+        """Returns ``True`` if this expression is between a given range.
+
+        Args:
+            low: lower bound of the range (inclusive).
+            high: higher bound of the range (inclusive).
+            negated: negates whether the expression is between a given range
+        """
+        if not isinstance(low, Expr):
+            low = Expr.literal(low)
+
+        if not isinstance(high, Expr):
+            high = Expr.literal(high)
+
+        return Expr(self.expr.between(low.expr, high.expr, negated=negated))
 
     def rex_type(self) -> RexType:
         """Return the Rex Type of this expression.
@@ -420,16 +515,16 @@ class Expr:
 
     def column_name(self, plan: LogicalPlan) -> str:
         """Compute the output column name based on the provided logical plan."""
-        return self.expr.column_name(plan)
+        return self.expr.column_name(plan._raw_plan)
 
-    def order_by(self, *exprs: Expr) -> ExprFuncBuilder:
+    def order_by(self, *exprs: Expr | SortExpr) -> ExprFuncBuilder:
         """Set the ordering for a window or aggregate function.
 
         This function will create an :py:class:`ExprFuncBuilder` that can be used to
         set parameters for either window or aggregate functions. If used on any other
         type of expression, an error will be generated when ``build()`` is called.
         """
-        return ExprFuncBuilder(self.expr.order_by(list(e.expr for e in exprs)))
+        return ExprFuncBuilder(self.expr.order_by([sort_or_default(e) for e in exprs]))
 
     def filter(self, filter: Expr) -> ExprFuncBuilder:
         """Filter an aggregate function.
@@ -456,7 +551,7 @@ class Expr:
         set parameters for either window or aggregate functions. If used on any other
         type of expression, an error will be generated when ``build()`` is called.
         """
-        return ExprFuncBuilder(self.expr.null_treatment(null_treatment))
+        return ExprFuncBuilder(self.expr.null_treatment(null_treatment.value))
 
     def partition_by(self, *partition_by: Expr) -> ExprFuncBuilder:
         """Set the partitioning for a window function.
@@ -478,6 +573,36 @@ class Expr:
         """
         return ExprFuncBuilder(self.expr.window_frame(window_frame.window_frame))
 
+    def over(self, window: Window) -> Expr:
+        """Turn an aggregate function into a window function.
+
+        This function turns any aggregate function into a window function. With the
+        exception of ``partition_by``, how each of the parameters is used is determined
+        by the underlying aggregate function.
+
+        Args:
+            window: Window definition
+        """
+        partition_by_raw = expr_list_to_raw_expr_list(window._partition_by)
+        order_by_raw = sort_list_to_raw_sort_list(window._order_by)
+        window_frame_raw = (
+            window._window_frame.window_frame
+            if window._window_frame is not None
+            else None
+        )
+        null_treatment_raw = (
+            window._null_treatment.value if window._null_treatment is not None else None
+        )
+
+        return Expr(
+            self.expr.over(
+                partition_by=partition_by_raw,
+                order_by=order_by_raw,
+                window_frame=window_frame_raw,
+                null_treatment=null_treatment_raw,
+            )
+        )
+
 
 class ExprFuncBuilder:
     def __init__(self, builder: expr_internal.ExprFuncBuilder):
@@ -489,7 +614,9 @@ class ExprFuncBuilder:
         Values given in ``exprs`` must be sort expressions. You can convert any other
         expression to a sort expression using `.sort()`.
         """
-        return ExprFuncBuilder(self.builder.order_by(list(e.expr for e in exprs)))
+        return ExprFuncBuilder(
+            self.builder.order_by([sort_or_default(e) for e in exprs])
+        )
 
     def filter(self, filter: Expr) -> ExprFuncBuilder:
         """Filter values during aggregation."""
@@ -501,7 +628,7 @@ class ExprFuncBuilder:
 
     def null_treatment(self, null_treatment: NullTreatment) -> ExprFuncBuilder:
         """Set how nulls are treated for either window or aggregate functions."""
-        return ExprFuncBuilder(self.builder.null_treatment(null_treatment))
+        return ExprFuncBuilder(self.builder.null_treatment(null_treatment.value))
 
     def partition_by(self, *partition_by: Expr) -> ExprFuncBuilder:
         """Set partitioning for window functions."""
@@ -516,6 +643,30 @@ class ExprFuncBuilder:
     def build(self) -> Expr:
         """Create an expression from a Function Builder."""
         return Expr(self.builder.build())
+
+
+class Window:
+    """Define reusable window parameters."""
+
+    def __init__(
+        self,
+        partition_by: Optional[list[Expr]] = None,
+        window_frame: Optional[WindowFrame] = None,
+        order_by: Optional[list[SortExpr | Expr]] = None,
+        null_treatment: Optional[NullTreatment] = None,
+    ) -> None:
+        """Construct a window definition.
+
+        Args:
+            partition_by: Partitions for window operation
+            window_frame: Define the start and end bounds of the window frame
+            order_by: Set ordering
+            null_treatment: Indicate how nulls are to be treated
+        """
+        self._partition_by = partition_by
+        self._window_frame = window_frame
+        self._order_by = order_by
+        self._null_treatment = null_treatment
 
 
 class WindowFrame:
@@ -626,3 +777,27 @@ class CaseBuilder:
         Any non-matching cases will end in a `null` value.
         """
         return Expr(self.case_builder.end())
+
+
+class SortExpr:
+    """Used to specify sorting on either a DataFrame or function."""
+
+    def __init__(self, expr: Expr, ascending: bool, nulls_first: bool) -> None:
+        """This constructor should not be called by the end user."""
+        self.raw_sort = expr_internal.SortExpr(expr, ascending, nulls_first)
+
+    def expr(self) -> Expr:
+        """Return the raw expr backing the SortExpr."""
+        return Expr(self.raw_sort.expr())
+
+    def ascending(self) -> bool:
+        """Return ascending property."""
+        return self.raw_sort.ascending()
+
+    def nulls_first(self) -> bool:
+        """Return nulls_first property."""
+        return self.raw_sort.nulls_first()
+
+    def __repr__(self) -> str:
+        """Generate a string representation of this expression."""
+        return self.raw_sort.__repr__()
